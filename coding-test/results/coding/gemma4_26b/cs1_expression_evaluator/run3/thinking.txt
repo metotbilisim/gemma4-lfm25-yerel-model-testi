@@ -1,0 +1,1219 @@
+*   Namespace: `Bench`
+    *   Class: `ExpressionEvaluator` (static)
+    *   Method: `public static double Evaluate(string expression)`
+    *   Supported: Numbers (int, decimal), `+`, `-`, `*`, `/`, `^`, `(`, `)`.
+    *   Unary: `+`, `-`.
+    *   Precedence/Associativity:
+        *   `^`: Highest, Right-associative.
+        *   Unary `+`/`-`: Weaker than `^`. (Wait, the prompt says `-2^2 = -4`. This means `^` is higher than unary minus. But `2^-1` is allowed. This implies unary minus is treated as a prefix operator with lower precedence than power, but it can appear as an operand to power).
+        *   `*`, `/`: Middle, Left-associative.
+        *   `+`, `-`: Lowest, Left-associative.
+    *   Whitespace: Ignored.
+    *   Culture: Invariant (use `CultureInfo.InvariantCulture`).
+    *   Errors: `FormatException` (empty, invalid chars, mismatched parens, missing operands, consecutive numbers, consecutive binary ops, malformed numbers), `DivideByZeroException`.
+    *   Constraints: No `DataTable.Compute`, no Roslyn, no external libs.
+
+    *   A standard way to evaluate expressions is the Shunting-Yard algorithm (to convert to Reverse Polish Notation - RPN) followed by an RPN evaluator, or a recursive descent parser.
+    *   Given the specific precedence rules (especially the unary minus vs power rule), a recursive descent parser or a modified Shunting-Yard is best.
+
+    *   Let's define the grammar:
+        *   `Expression` -> `Term` { (`+` | `-`) `Term` }
+        *   `Term` -> `Factor` { (`*` | `/`) `Factor` }
+        *   `Factor` -> `Unary` [ `^` `Factor` ] (Right associative)
+        *   `Unary` -> (`+` | `-`) `Unary` | `Primary`
+        *   `Primary` -> `Number` | `(` `Expression` `)`
+
+    *   *Wait*, let's re-check the requirement: `"-2^2" = -4`.
+        If `Unary` is `+` or `-` followed by `Unary`, and `Factor` is `Unary ^ Factor`, then:
+        `-2^2` -> `Unary(-)` `Factor(2^2)` -> `- (2^2)` -> `-4`. Correct.
+        `2^-1` -> `Factor(2 ^ Unary(-1))` -> `2 ^ (-1)` -> `0.5`. Correct.
+        `2^3^2` -> `Factor(2 ^ Factor(3^2))` -> `2 ^ 9` -> `512`. Correct.
+
+    *   *Wait*, let's refine the grammar to handle the "unary minus binds weaker than `^`" requirement correctly.
+        Standard precedence:
+        1. Parentheses
+        2. Exponentiation (Right-associative)
+        3. Unary (+, -)
+        4. Multiplication, Division (Left-associative)
+        5. Addition, Subtraction (Left-associative)
+
+        *Wait*, the prompt says: "Unary minus/plus binds weaker than `^` (`-2^2` = -4)".
+        If Unary is *weaker* than `^`, then `-2^2` is interpreted as `-(2^2)`.
+        If Unary is *stronger* than `^`, then `-2^2` is interpreted as `(-2)^2 = 4`.
+        The prompt says `-2^2 = -4`, so Unary is indeed *weaker* than `^`.
+
+        Let's re-order precedence:
+        1. Parentheses
+        2. Exponentiation (`^`) - Right associative
+        3. Unary (`+`, `-`)
+        4. Multiplicative (`*`, `/`) - Left associative
+        5. Additive (`+`, `-`) - Left associative
+
+        *Wait*, let's check the `2^-1` case again.
+        If Unary is *weaker* than `^`, then `2^-1` would be `(2^-)1`? No, that doesn't make sense.
+        Usually, in math, unary operators are very high precedence. But the prompt explicitly defines the behavior.
+        Let's look at `2^-1`. If `^` is higher than unary, then `2^-1` is problematic unless the unary operator is part of the exponent.
+
+        Let's try this Grammar:
+        `Expr` -> `Term` { (`+` | `-`) `Term` }
+        `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        `Unary` -> (`+` | `-`) `Unary` | `Power`
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Primary` -> `Number` | `(` `Expr` `)`
+
+        Let's trace `2^-1`:
+        `Expr` -> `Term`
+        `Term` -> `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary(2)` `^` `Power`
+        `Power` -> `Unary`
+        `Unary` -> `-` `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary(1)`
+        Result: `2 ^ (-1)`. Correct.
+
+        Let's trace `-2^2`:
+        `Expr` -> `Term`
+        `Term` -> `Unary`
+        `Unary` -> `-` `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary(2)` `^` `Power`
+        `Power` -> `Primary(2)`
+        Result: `-(2^2)`. Correct.
+
+        Let's trace `2^3^2`:
+        `Power` -> `Primary(2)` `^` `Power`
+        `Power` -> `Primary(3)` `^` `Power`
+        `Power` -> `Primary(2)`
+        Result: `2^(3^2)`. Correct.
+
+    *   *Wait*, there's a potential conflict. If `Unary` is `+` or `-` followed by `Unary`, then `2*-3` would be `2 * (-3)`.
+        `Term` -> `Unary` { `*` `Unary` }
+        `Unary` -> `-` `Unary` | `Power`
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Primary` -> `Number` | `(` `Expr` `)`
+
+        Let's trace `2*-3`:
+        `Term` -> `Unary(2)` `*` `Unary(-3)`
+        `Unary(-3)` -> `-` `Unary(3)`
+        `Unary(3)` -> `Power(3)`
+        Result: `2 * (-3)`. Correct.
+
+    *   *Wait*, what about `2--2`?
+        `Term` -> `Unary(2)` `*` `Unary(-(-2))`? No, the input is `2--2`.
+        `Term` -> `Unary(2)` `*` `Unary(-2)`? No, the input is `2--2`.
+        Wait, `2--2` is `2 - (-2)`.
+        `Expr` -> `Term(2)` `-` `Term(-2)`? No, `Term` is `Unary { * / Unary }`.
+        `Expr` -> `Term(2)` `-` `Term`
+        `Term` -> `Unary`
+        `Unary` -> `-` `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary(2)`
+        Result: `2 - (-2)`. Correct.
+
+    *   *Wait*, what about `2*-3`?
+        `Term` -> `Unary(2)` `*` `Unary(-3)`
+        `Unary(-3)` -> `-` `Unary(3)`
+        `Unary(3)` -> `Power(3)`
+        Result: `2 * (-3)`. Correct.
+
+    *   *Wait*, what about `2^--2`?
+        `Power` -> `Primary(2)` `^` `Power`
+        `Power` -> `Unary(-(-2))`
+        `Unary` -> `-` `Unary`
+        `Unary` -> `-` `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary(2)`
+        Result: `2 ^ (-(-2))`. Correct.
+
+    *   *Wait*, what about `2 3`?
+        The parser must detect if two numbers are adjacent.
+        In the grammar, `Primary` is `Number` or `( Expr )`.
+        If we have `2 3`, the `Expr` parser will consume `2`, then look for `+` or `-`. It won't find it, so it returns `2`. Then the caller (the top level) sees `3` left over. This is a good way to detect errors.
+
+    *   *Wait*, what about `3**2`?
+        `Term` -> `Unary` { `*` | `/` `Unary` }
+        If we have `3**2`, `Term` consumes `3`, then sees `*`. It expects a `Unary`.
+        `Unary` starts with `+`, `-`, or `Primary`.
+        `Primary` starts with `Number` or `(`.
+        `*` is none of those. So `Unary` will fail.
+
+    *   *Wait*, what about `()`?
+        `Primary` -> `(` `Expr` `)`.
+        `Expr` must contain at least one `Term`.
+        If `Expr` is empty, the parser should throw.
+
+    *   `Token` type: `Number`, `Plus`, `Minus`, `Multiply`, `Divide`, `Power`, `LParen`, `RParen`, `EOF`.
+    *   `Lexer` class:
+        *   `NextToken()`
+        *   Handles numbers (using `double.Parse(..., CultureInfo.InvariantCulture)`).
+        *   Handles whitespace.
+        *   Throws `FormatException` for invalid characters or malformed numbers.
+    *   `Parser` class:
+        *   `ParseExpression()`
+        *   `ParseTerm()`
+        *   `ParseUnary()`
+        *   `ParsePower()`
+        *   `ParsePrimary()`
+        *   Throws `FormatException` for syntax errors.
+        *   Throws `DivideByZeroException` for division by zero.
+
+    *   `2 3`: Lexer returns `2`, then `3`. Parser finishes `2`. Top level sees `3` is not `EOF`. Error.
+    *   `3**2`: Lexer returns `3`, `*`, `*`, `2`. Parser consumes `3`, `*`. Next token is `*`. `ParseUnary` expects `+`, `-`, or `Primary`. `*` is none. Error.
+    *   `2+`: Lexer returns `2`, `+`, `EOF`. Parser consumes `2`, `+`. `ParseTerm` expects `Unary`. `Unary` expects `+`, `-`, or `Primary`. `EOF` is none. Error.
+    *   `*3`: Lexer returns `*`, `3`, `EOF`. Parser starts `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` expects `Number` or `(`. `*` is none. Error.
+    *   `1.2.3`: Lexer `double.Parse` will throw `FormatException`.
+    *   `()`: `ParsePrimary` calls `ParseExpression`. `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `)`. Error.
+
+    *   `2^3^2` is `2^(3^2) = 512`.
+    *   `2^-1` is `2^(-1) = 0.5`.
+    *   `-2^2` is `-(2^2) = -4`.
+    *   `2*-3` is `2*(-3) = -6`.
+    *   `--2` is `-(-2) = 2`.
+    *   `2^-(-1)` is `2^(-(-1)) = 2^1 = 2`.
+
+    *   `double.Parse(s, CultureInfo.InvariantCulture)` is good.
+    *   `Math.Pow(a, b)` for `^`.
+    *   `DivideByZeroException` is tricky with `double`. `1.0 / 0.0` in C# results in `double.PositiveInfinity`, not an exception.
+    *   *Requirement check*: "Throw `DivideByZeroException` when dividing by zero."
+    *   So, I must manually check if the divisor is `0` before dividing.
+
+    *   `2 3`:
+        `tokens = [2, 3, EOF]`
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary` -> `2`.
+        `ParseTerm` sees `3` (not `*` or `/`), returns `2`.
+        `ParseExpression` sees `3` (not `+` or `-`), returns `2`.
+        `Evaluate` checks `PeekToken()`. It's `3`. Throw `FormatException`.
+
+    *   `3**2`:
+        `tokens = [3, *, *, 2, EOF]`
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary` -> `3`.
+        `ParseTerm` sees `*`. Calls `ParseUnary`.
+        `ParseUnary` calls `ParsePower` -> `ParsePrimary`.
+        `ParsePrimary` sees `*`. Throws `FormatException`.
+
+    *   `()`:
+        `tokens = [(, ), EOF]`
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary` -> `(`.
+        `ParsePrimary` calls `ParseExpression`.
+        `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`.
+        `ParsePrimary` sees `)`. Throws `FormatException`.
+
+    *   `2+`:
+        `tokens = [2, +, EOF]`
+        `ParseExpression` -> `ParseTerm` -> `2`.
+        `ParseExpression` sees `+`. Calls `ParseTerm`.
+        `ParseTerm` calls `ParseUnary` -> `ParsePower` -> `ParsePrimary`.
+        `ParsePrimary` sees `EOF`. Throws `FormatException`.
+
+    *   `2^-1`:
+        `tokens = [2, ^, -, 1, EOF]`
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower`.
+        `ParsePower` -> `Primary(2)` `^` `Power`.
+        `Power` -> `Unary(-1)`.
+        `Unary(-1)` -> `-` `Unary(1)`.
+        `Unary(1)` -> `Power(1)` -> `Primary(1)`.
+        Result: `2 ^ (-1)`. Correct.
+
+    *   `2^3^2`:
+        `tokens = [2, ^, 3, ^, 2, EOF]`
+        `ParsePower` -> `Primary(2)` `^` `Power`.
+        `Power` -> `Primary(3)` `^` `Power`.
+        `Power` -> `Primary(2)`.
+        Result: `2 ^ (3 ^ 2)`. Correct.
+
+    *   `Math.Pow(0, 0)` is `1`. This is standard.
+    *   `Math.Pow(negative, non-integer)` is `NaN`. This is standard.
+    *   The prompt doesn't specify how to handle `NaN`, so `double`'s default behavior is fine.
+
+    *   `double.Parse` handles `.5` and `3.14`.
+    *   Need to ensure `1.2.3` is caught. `double.Parse` will throw `FormatException` for `1.2.3`.
+
+    *   `ParseExpression` (lowest precedence: `+`, `-`)
+    *   `ParseTerm` (middle: `*`, `/`)
+    *   `ParseUnary` (unary `+`, `-`)
+    *   `ParsePower` (highest: `^`, right-associative)
+    *   `ParsePrimary` (parentheses, numbers)
+
+    *Wait*, let's re-verify the `Unary` vs `Power` precedence.
+    Prompt: `Unary minus/plus binds weaker than ^ (-2^2 = -4)`.
+    My grammar:
+    `Unary` -> `+ Unary | - Unary | Power`
+    `Power` -> `Primary ^ Power | Primary`
+    If input is `-2^2`:
+    `Unary` -> `- Unary` -> `- Power` -> `- (Primary(2) ^ Power(2))` -> `-4`.
+    This matches.
+
+    If input is `2^-1`:
+    `Power` -> `Primary(2) ^ Power`
+    `Power` -> `Unary(-1)`
+    `Unary(-1)` -> `- Unary(1)`
+    `Unary(1)` -> `Power(1)` -> `Primary(1)`
+    Result: `2 ^ (-1)`. This also matches.
+
+    *Wait*, what about `2^-2^2`?
+    `2 ^ (- (2^2))` = `2 ^ -4`.
+    `2 ^ ((-2)^2)` = `2 ^ 4`.
+    In my grammar:
+    `2 ^ -2 ^ 2`
+    `Power(2) ^ Power(-2 ^ 2)`
+    `Power(-2 ^ 2)` -> `Unary(-)` `Power(2 ^ 2)` -> `- (2 ^ 2)` -> `-4`.
+    So `2 ^ -4`.
+    This is consistent with `-2^2` being `-(2^2)`.
+
+    *   `Lexer` needs to track position.
+    *   `Parser` needs to track current token.
+    *   `FormatException` for all errors.
+    *   `DivideByZeroException` for `x / 0`.
+
+    *   `2 3`: `ParseExpression` returns `2`. `PeekToken` is `3`. Throw.
+    *   `3**2`: `ParseTerm` calls `ParseUnary`. `ParseUnary` calls `ParsePower`. `ParsePower` calls `ParsePrimary`. `ParsePrimary` sees `*`. Throw.
+    *   `2+`: `ParseExpression` calls `ParseTerm`. `ParseTerm` returns `2`. `ParseExpression` sees `+`. Calls `ParseTerm`. `ParseTerm` calls `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `EOF`. Throw.
+    *   `()`: `ParsePrimary` calls `ParseExpression`. `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `)`. Throw.
+    *   `1.2.3`: `double.Parse` throws `FormatException`.
+
+    One detail: `2^-1`.
+    `Power` -> `Primary(2) ^ Power`
+    `Power` -> `Unary(-1)`
+    `Unary(-1)` -> `- Unary(1)`
+    `Unary(1)` -> `Power(1)` -> `Primary(1)`
+    This works.
+
+    What about `2^--2`?
+    `Power` -> `Primary(2) ^ Power`
+    `Power` -> `Unary(-(-2))`
+    `Unary(-(-2))` -> `- Unary(-2)` -> `- (- Unary(2))` -> `- (- Power(2))` -> `- (- 2)`.
+    This works.
+
+    *   `double.Parse(..., CultureInfo.InvariantCulture)`
+    *   `Math.Pow`
+    *   `string.IsNullOrWhiteSpace`
+    *   `throw new FormatException(...)`
+    *   `throw new DivideByZeroException(...)`
+
+    *   `2^3^2` -> `2^(3^2)` = 512.
+    *   `2^-1` -> `2^(-1)` = 0.5.
+    *   `-2^2` -> `-(2^2)` = -4.
+    *   `2*-3` -> `2*(-3)` = -6.
+    *   `--2` -> `-(-2)` = 2.
+    *   `2^-(-1)` -> `2^(-(-1))` = 2.
+
+    Wait, one edge case: `2^-1`.
+    In my grammar:
+    `Power` -> `Primary ^ Power`
+    `Power` -> `Unary`
+    `Unary` -> `- Unary`
+    `Unary` -> `Power`
+    `Power` -> `Primary(1)`
+    So `2 ^ (-1)`. This is correct.
+
+    What about `2^2^3`?
+    `Power` -> `Primary(2) ^ Power`
+    `Power` -> `Primary(2) ^ Power`
+    `Power` -> `Primary(3)`
+    Result `2^(2^3) = 2^8 = 256`. Correct.
+
+    *   `+` (unary)
+    *   `-` (unary)
+    *   `*`
+    *   `/`
+    *   `^`
+    *   `(`
+    *   `)`
+    *   `Number`
+
+    Wait, the prompt says: "unary minus/plus binds weaker than `^` (`-2^2` = -4)".
+    My grammar:
+    `Unary` -> `+ Unary | - Unary | Power`
+    `Power` -> `Primary ^ Power | Primary`
+    This means `Unary` is *higher* precedence than `Power`? No.
+    If `Unary` is `+ Unary | - Unary | Power`, then `Unary` *contains* `Power`.
+    In a recursive descent parser, the function called *first* has the *lowest* precedence.
+    So:
+    `ParseExpression` (lowest)
+    `ParseTerm`
+    `ParseUnary`
+    `ParsePower`
+    `ParsePrimary` (highest)
+
+    Let's re-trace `-2^2` with this order:
+    `ParseExpression` calls `ParseTerm`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` sees `-`. It calls `ParseUnary` again.
+    `ParseUnary` (the second one) calls `ParsePower`.
+    `ParsePower` sees `2^2` and returns `4`.
+    `ParseUnary` returns `-4`.
+    `ParseTerm` returns `-4`.
+    `ParseExpression` returns `-4`.
+    Correct.
+
+    Let's re-trace `2^-1`:
+    `ParseExpression` calls `ParseTerm`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` calls `ParsePower`.
+    `ParsePower` sees `2 ^ ...`. It calls `ParsePower` for the exponent.
+    The exponent `ParsePower` calls `ParseUnary`.
+    `ParseUnary` sees `-`. It calls `ParseUnary` again.
+    `ParseUnary` (the second one) calls `ParsePower`.
+    `ParsePower` sees `1` and returns `1`.
+    `ParseUnary` returns `-1`.
+    `ParsePower` returns `2 ^ -1`.
+    Correct.
+
+    Wait, there's a slight logic error in my trace. Let's be very careful.
+    If `Unary` is *weaker* than `^`, it means `^` should be called *inside* `Unary`.
+    If `Unary` is *stronger* than `^`, it means `Unary` should be called *inside* `Power`.
+
+    Let's look at the precedence levels:
+    1. `Primary` (Parentheses, Numbers)
+    2. `Power` (Exponentiation)
+    3. `Unary` (Unary +/-)
+    4. `Term` (Multiplication, Division)
+    5. `Expression` (Addition, Subtraction)
+
+    If `Unary` is *weaker* than `Power`, then `Power` is "tighter".
+    In a recursive descent parser:
+    `Expression` calls `Term`
+    `Term` calls `Unary`
+    `Unary` calls `Power`
+    `Power` calls `Primary`
+
+    Wait, if `Unary` calls `Power`, then `Unary` is *lower* precedence than `Power`.
+    Let's re-trace `-2^2` with `Unary` calling `Power`:
+    `ParseUnary` sees `-`.
+    It calls `ParseUnary` (recursive).
+    That `ParseUnary` calls `ParsePower`.
+    `ParsePower` sees `2^2` and returns `4`.
+    `ParseUnary` returns `-4`.
+    This means `Unary` is *lower* precedence than `Power`.
+    This matches the requirement `-2^2 = -4`.
+
+    Now let's re-trace `2^-1` with `Unary` calling `Power`:
+    `ParsePower` sees `2 ^ ...`.
+    It calls `ParsePower` for the exponent.
+    The exponent `ParsePower` calls `ParseUnary`.
+    `ParseUnary` sees `-`.
+    It calls `ParseUnary` (recursive).
+    That `ParseUnary` calls `ParsePower`.
+    `ParsePower` sees `1` and returns `1`.
+    `ParseUnary` returns `-1`.
+    `ParsePower` returns `2 ^ -1`.
+    This also matches!
+
+    So the order is:
+    `Expression` (lowest)
+    `Term`
+    `Unary`
+    `Power`
+    `Primary` (highest)
+
+    Wait, I just realized: `Unary` calling `Power` means `Unary` is *lower* precedence than `Power`.
+    Is `2^-1` allowed if `Unary` is lower than `Power`?
+    Yes, because `Power` calls `Unary` for its exponent.
+    `Power` -> `Primary ^ Power`
+    `Power` -> `Unary`
+    `Unary` -> `- Unary`
+    `Unary` -> `Power`
+    `Power` -> `Primary`
+    This allows the unary operator to be part of the exponent.
+
+    Let's check `2*-3` again.
+    `Term` calls `Unary`.
+    `Unary` calls `Power`.
+    `Power` calls `Primary`.
+    `Primary` is `3`.
+    `Unary` sees `-` and calls `Unary(3)`.
+    `Unary(3)` returns `3`.
+    `Unary` returns `-3`.
+    `Term` returns `2 * -3`.
+    Correct.
+
+    Wait, one more: `2^3^2`.
+    `Power` calls `Power` (right associative).
+    `Power` -> `Primary(2) ^ Power(3^2)`.
+    `Power(3^2)` -> `Primary(3) ^ Power(2)`.
+    `Power(2)` -> `Primary(2)`.
+    Result `2^(3^2)`. Correct.
+
+    *   `Lexer`:
+        *   `_index`
+        *   `_input`
+        *   `NextToken()`
+        *   `PeekToken()`
+        *   `SkipWhitespace()`
+        *   `ParseNumber()`
+    *   `Parser`:
+        *   `_lexer`
+        *   `_currentToken`
+        *   `Eat(TokenType)`
+        *   `ParseExpression()`
+        *   `ParseTerm()`
+        *   `ParseUnary()`
+        *   `ParsePower()`
+        *   `ParsePrimary()`
+
+    *   `2 3`: `ParseExpression` returns `2`. `_currentToken` is `3`. `Evaluate` throws `FormatException`.
+    *   `3**2`: `ParseTerm` calls `ParseUnary`. `ParseUnary` calls `ParsePower`. `ParsePower` calls `ParsePrimary`. `ParsePrimary` sees `*`. `ParsePrimary` throws `FormatException`.
+    *   `2+`: `ParseExpression` calls `ParseTerm` (returns `2`). `ParseExpression` sees `+`. Calls `ParseTerm`. `ParseTerm` calls `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `EOF`. `ParsePrimary` throws `FormatException`.
+    *   `()`: `ParsePrimary` calls `ParseExpression`. `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `)`. `ParsePrimary` throws `FormatException`.
+    *   `1.2.3`: `double.Parse` throws `FormatException`.
+    *   `2^-1`: `Power` calls `Power` which calls `Unary` which calls `Unary` which calls `Power` which calls `Primary`. Works.
+    *   `2^3^2`: `Power` calls `Power` which calls `Power`. Works.
+    *   `2*-3`: `Term` calls `Unary` which calls `Power` which calls `Primary`. Works.
+    *   `--2`: `Unary` calls `Unary` which calls `Power` which calls `Primary`. Works.
+
+    *   `2^3^2` is `2^(3^2) = 512`.
+    *   `2^-1` is `0.5`.
+    *   `-2^2` is `-4`.
+    *   `2*-3` is `-6`.
+    *   `--2` is `2`.
+    *   `2^-(-1)` is `2`.
+
+    Wait, one more check. If `Unary` is *weaker* than `^`, then `-2^2` is `-(2^2)`.
+    If `Unary` is *stronger* than `^`, then `-2^2` is `(-2)^2`.
+    The requirement says `-2^2 = -4`.
+    My grammar:
+    `Unary` -> `- Unary | Power`
+    `Power` -> `Primary ^ Power | Primary`
+    In this grammar, `Unary` is *lower* precedence than `Power`.
+    When `ParseUnary` is called, it can consume a `-` and then call `ParseUnary` again.
+    If the input is `-2^2`:
+    `ParseUnary` sees `-`.
+    It calls `ParseUnary` (recursive).
+    The recursive `ParseUnary` calls `ParsePower`.
+    `ParsePower` sees `2^2` and returns `4`.
+    `ParseUnary` returns `-4`.
+    This is exactly what we want.
+
+    Wait, what if the input is `(-2)^2`?
+    `ParsePrimary` sees `(`.
+    It calls `ParseExpression`.
+    `ParseExpression` calls `ParseTerm` -> `ParseUnary`.
+    `ParseUnary` sees `-`.
+    It calls `ParseUnary` (recursive).
+    The recursive `ParseUnary` calls `ParsePower` -> `ParsePrimary`.
+    `ParsePrimary` sees `2`.
+    `ParseUnary` returns `-2`.
+    `ParsePrimary` returns `(-2)`.
+    `ParsePower` returns `(-2)^2 = 4`.
+    Perfect.
+
+    *   `double.Parse(..., CultureInfo.InvariantCulture)`
+    *   `Math.Pow(a, b)`
+    *   `DivideByZeroException`
+    *   `FormatException`
+    *   `Namespace Bench`
+    *   `Static class ExpressionEvaluator`
+    *   `Public static double Evaluate(string expression)`
+
+    Wait, one small thing. The prompt says: "Throw `FormatException` for any invalid input, including: ... doubled binary operators (`3**2`)".
+    In my parser, `3**2` will trigger `ParsePrimary` to see `*` and throw `FormatException`.
+    What about `2+-3`?
+    `2` is `Term`. `+` is `Expression` operator. `-` is `Unary` operator.
+    `2 + (-3)` should be valid.
+    Let's check:
+    `ParseExpression` -> `ParseTerm(2)`
+    `ParseExpression` sees `+`. Calls `ParseTerm`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` sees `-`. Calls `ParseUnary(3)`.
+    `ParseUnary(3)` returns `3`.
+    `ParseUnary` returns `-3`.
+    `ParseTerm` returns `-3`.
+    `ParseExpression` returns `2 + (-3) = -1`.
+    This is standard math behavior. `2+-3` is `2 + (-3)`.
+
+    What about `2--3`?
+    `2 - (-3) = 5`.
+    `ParseExpression` -> `ParseTerm(2)`
+    `ParseExpression` sees `-`. Calls `ParseTerm`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` sees `-`. Calls `ParseUnary(3)`.
+    `ParseUnary(3)` returns `3`.
+    `ParseUnary` returns `-3`.
+    `ParseTerm` returns `-3`.
+    `ParseExpression` returns `2 - (-3) = 5`.
+    This is also standard.
+
+    What about `2*-3`?
+    `ParseTerm` -> `ParseUnary(2)`
+    `ParseTerm` sees `*`. Calls `ParseUnary`.
+    `ParseUnary` sees `-`. Calls `ParseUnary(3)`.
+    `ParseUnary(3)` returns `3`.
+    `ParseUnary` returns `-3`.
+    `ParseTerm` returns `2 * -3 = -6`.
+    Correct.
+
+    Wait, the prompt says: "doubled binary operators (`3**2`)".
+    My parser handles `3**2` by throwing `FormatException`.
+    It also handles `2+-3` as `2 + (-3)`. This is because `+` is a binary operator and `-` is a unary operator. This is standard. If the requirement meant `2+-3` is also an error, it would have said "consecutive operators". But it specifically said "doubled binary operators". `+` and `-` in `2+-3` are not both binary.
+
+    *   `2 3` -> `FormatException` (handled by checking `EOF`)
+    *   `3**2` -> `FormatException` (handled by `ParsePrimary` seeing `*`)
+    *   `2+` -> `FormatException` (handled by `ParsePrimary` seeing `EOF`)
+    *   `()` -> `FormatException` (handled by `ParsePrimary` seeing `)`)
+    *   `1.2.3` -> `FormatException` (handled by `double.Parse`)
+    *   `DivideByZeroException` -> (handled by `if (divisor == 0)`)
+
+    One more check: `2^3^2`.
+    `Power` -> `Primary(2) ^ Power(3^2)`
+    `Power(3^2)` -> `Primary(3) ^ Power(2)`
+    `Power(2)` -> `Primary(2)`
+    This is right-associative. Correct.
+
+    One more check: `2*3*4`.
+    `Term` -> `Unary(2) * Unary(3) * Unary(4)`
+    `Term` -> `Term(2*3) * Unary(4)`
+    This is left-associative. Correct.
+
+    One more check: `2-3-4`.
+    `Expression` -> `Expression(2-3) - Unary(4)`
+    This is left-associative. Correct.
+
+    *   `Lexer` needs to handle `.` in numbers.
+    *   `Lexer` needs to handle `^`, `*`, `/`, `+`, `-`, `(`, `)`.
+    *   `Lexer` needs to handle `double.Parse`.
+
+    ```csharp
+    private class Lexer {
+        private readonly string _input;
+        private int _pos;
+        public Lexer(string input) { _input = input; _pos = 0; }
+        public Token NextToken() {
+            SkipWhitespace();
+            if (_pos >= _input.Length) return new Token(TokenType.EOF);
+            char c = _input[_pos];
+            if (char.IsDigit(c) || c == '.') {
+                // Parse number
+                // ...
+            }
+            // ... other tokens
+        }
+    }
+    ```
+
+    Wait, `char.IsDigit(c) || c == '.'` might be tricky for `.5`.
+    If `c == '.'`, it's the start of a number.
+    Let's refine `ParseNumber`:
+    ```csharp
+    int start = _pos;
+    bool hasDecimal = false;
+    if (_input[_pos] == '.') {
+        hasDecimal = true;
+        _pos++;
+    }
+    while (_pos < _input.Length && (char.IsDigit(_input[_pos]) || _input[_pos] == '.')) {
+        if (_input[_pos] == '.') {
+            if (hasDecimal) throw new FormatException("Malformed number");
+            hasDecimal = true;
+        }
+        _pos++;
+    }
+    string numStr = _input.Substring(start, _pos - start);
+    if (!double.TryParse(numStr, NumberStyles.Float, CultureInfo.InvariantCulture, out double val))
+        throw new FormatException("Invalid number");
+    ```
+    Actually, `double.Parse` with `CultureInfo.InvariantCulture` is safer. Let's just collect all characters that could be part of a number (digits and one dot) and then parse.
+
+    Wait, `1.2.3` should be caught.
+    If I collect `1.2.3` as a single token, `double.Parse` will throw `FormatException`.
+    If I collect `1.2` and then see `.3`, the lexer will see `1.2` and then `.` and then `3`.
+    The `.` will be treated as a new token? No, `.` is not a valid token on its own.
+    So the lexer should:
+    1. If it sees a digit or `.`:
+    2. Read all consecutive digits and dots.
+    3. Try to parse the resulting string as a `double`.
+    4. If parsing fails, throw `FormatException`.
+
+    Example `1.2.3`:
+    - `_pos` is at `1`.
+    - Read `1.2.3`.
+    - `double.Parse("1.2.3")` throws `FormatException`.
+    Perfect.
+
+    Example `.5`:
+    - `_pos` is at `.`.
+    - Read `.5`.
+    - `double.Parse(".5")` returns `0.5`.
+    Perfect.
+
+    Example `2.`:
+    - `_pos` is at `2`.
+    - Read `2.`.
+    - `double.Parse("2.")` returns `2.0`.
+    Perfect.
+
+    Wait, what if the input is `2. 3`?
+    - `_pos` is at `2`.
+    - Read `2.`.
+    - `double.Parse("2.")` returns `2.0`.
+    - Next token is `3`.
+    - `Evaluate` sees `2.0` and then `3`.
+    - Throws `FormatException`.
+    Perfect.
+
+    ```csharp
+    private enum TokenType { Number, Plus, Minus, Multiply, Divide, Power, LParen, RParen, EOF }
+    private record Token(TokenType Type, double Value = 0);
+    ```
+
+    Wait, `record` is C# 9+. The prompt says .NET 10, so that's fine. But to be safe and simple, a `struct` or `class` is fine.
+
+    ```csharp
+    private class Lexer {
+        private readonly string _input;
+        private int _pos;
+
+        public Lexer(string input) {
+            _input = input;
+            _pos = 0;
+        }
+
+        public Token NextToken() {
+            while (_pos < _input.Length && char.IsWhiteSpace(_input[_pos])) _pos++;
+            if (_pos >= _input.Length) return new Token(TokenType.EOF);
+
+            char c = _input[_pos];
+            if (char.IsDigit(c) || c == '.') {
+                int start = _pos;
+                while (_pos < _input.Length && (char.IsDigit(_input[_pos]) || _input[_pos] == '.')) {
+                    _pos++;
+                }
+                string s = _input.Substring(start, _pos - start);
+                if (!double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out double val)) {
+                    throw new FormatException($"Invalid number: {s}");
+                }
+                return new Token(TokenType.Number, val);
+            }
+
+            _pos++;
+            return c switch {
+                '+' => new Token(TokenType.Plus),
+                '-' => new Token(TokenType.Minus),
+                '*' => new Token(TokenType.Multiply),
+                '/' => new Token(TokenType.Divide),
+                '^' => new Token(TokenType.Power),
+                '(' => new Token(TokenType.LParen),
+                ')' => new Token(TokenType.RParen),
+                _ => throw new FormatException($"Unknown character: {c}")
+            };
+        }
+    }
+    ```
+
+    Wait, `double.TryParse` with `NumberStyles.Any` might be too lenient (it might allow scientific notation like `1e10`). The prompt says "integers and decimals such as `3.14` and `.5`". It doesn't explicitly forbid scientific notation, but it doesn't require it. However, `1e10` is a valid decimal number. Let's use `NumberStyles.Float` to be safe.
+
+    Wait, `double.TryParse` with `NumberStyles.Float` and `CultureInfo.InvariantCulture` is the standard way to parse numbers like `1.23` or `1e10`.
+
+    ```csharp
+    public static double Evaluate(string expression) {
+        if (string.IsNullOrWhiteSpace(expression)) throw new FormatException("Empty expression");
+        var lexer = new Lexer(expression);
+        var parser = new Parser(lexer);
+        double result = parser.ParseExpression();
+        if (parser.PeekToken().Type != TokenType.EOF) {
+            throw new FormatException("Unexpected tokens at end of expression");
+        }
+        return result;
+    }
+    ```
+
+    Wait, `parser.PeekToken()` needs to be implemented.
+
+    ```csharp
+    private class Parser {
+        private readonly Lexer _lexer;
+        private Token _currentToken;
+
+        public Parser(Lexer lexer) {
+            _lexer = lexer;
+            _currentToken = _lexer.NextToken();
+        }
+
+        public Token PeekToken() => _currentToken;
+
+        private void Eat(TokenType type) {
+            if (_currentToken.Type == type) {
+                _currentToken = _lexer.NextToken();
+            } else {
+                throw new FormatException($"Expected {type} but found {_currentToken.Type}");
+            }
+        }
+
+        public double ParseExpression() {
+            double left = ParseTerm();
+            while (_currentToken.Type == TokenType.Plus || _currentToken.Type == TokenType.Minus) {
+                TokenType op = _currentToken.Type;
+                Eat(op);
+                double right = ParseTerm();
+                if (op == TokenType.Plus) left += right;
+                else left -= right;
+            }
+            return left;
+        }
+
+        public double ParseTerm() {
+            double left = ParseUnary();
+            while (_currentToken.Type == TokenType.Multiply || _currentToken.Type == TokenType.Divide) {
+                TokenType op = _currentToken.Type;
+                Eat(op);
+                double right = ParseUnary();
+                if (op == TokenType.Multiply) left *= right;
+                else {
+                    if (right == 0) throw new DivideByZeroException();
+                    left /= right;
+                }
+            }
+            return left;
+        }
+
+        public double ParseUnary() {
+            if (_currentToken.Type == TokenType.Plus) {
+                Eat(TokenType.Plus);
+                return ParseUnary();
+            }
+            if (_currentToken.Type == TokenType.Minus) {
+                Eat(TokenType.Minus);
+                return -ParseUnary();
+            }
+            return ParsePower();
+        }
+
+        public double ParsePower() {
+            double left = ParsePrimary();
+            if (_currentToken.Type == TokenType.Power) {
+                Eat(TokenType.Power);
+                double right = ParsePower(); // Right-associative
+                return Math.Pow(left, right);
+            }
+            return left;
+        }
+
+        public double ParsePrimary() {
+            if (_currentToken.Type == TokenType.Number) {
+                double val = _currentToken.Value;
+                Eat(TokenType.Number);
+                return val;
+            }
+            if (_currentToken.Type == TokenType.LParen) {
+                Eat(TokenType.LParen);
+                double val = ParseExpression();
+                Eat(TokenType.RParen);
+                return val;
+            }
+            throw new FormatException($"Unexpected token: {_currentToken.Type}");
+        }
+    }
+    ```
+
+    *   `2^-1`:
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary` -> `ParsePower`
+        `ParsePower` -> `ParsePrimary(2)`
+        `Eat(Power)`
+        `ParsePower` (recursive) -> `ParseUnary` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary(1)`
+        Result: `Math.Pow(2, -1)`. Correct.
+
+    *   `-2^2`:
+        `ParseExpression` -> `ParseTerm` -> `ParseUnary`
+        `ParseUnary` -> `Eat(Minus)`, `ParseUnary`
+        `ParseUnary` -> `ParsePower` -> `ParsePrimary(2)`
+        `ParsePower` -> `Eat(Power)`, `ParsePower` -> `ParsePrimary(2)`
+        `ParsePower` returns `4`.
+        `ParseUnary` returns `-4`.
+        Correct.
+
+    *   `2^3^2`:
+        `ParsePower` -> `ParsePrimary(2)`, `Eat(Power)`, `ParsePower`
+        `ParsePower` -> `ParsePrimary(3)`, `Eat(Power)`, `ParsePower`
+        `ParsePower` -> `ParsePrimary(2)`
+        Result: `Math.Pow(2, Math.Pow(3, 2))`. Correct.
+
+    *   `2*-3`:
+        `ParseTerm` -> `ParseUnary(2)`, `Eat(Multiply)`, `ParseUnary`
+        `ParseUnary` -> `Eat(Minus)`, `ParseUnary` -> `ParsePower` -> `ParsePrimary(3)`
+        Result: `2 * -3`. Correct.
+
+    *   `2--2`:
+        `ParseExpression` -> `ParseTerm(2)`, `Eat(Minus)`, `ParseTerm`
+        `ParseTerm` -> `ParseUnary` -> `Eat(Minus)`, `ParseUnary` -> `ParsePower` -> `ParsePrimary(2)`
+        Result: `2 - (-2)`. Correct.
+
+    *   `3**2`:
+        `ParseTerm` -> `ParseUnary(3)`, `Eat(Multiply)`, `ParseUnary`
+        `ParseUnary` -> `ParsePower` -> `ParsePrimary`
+        `ParsePrimary` sees `*`. Throws `FormatException`. Correct.
+
+    *   `2 3`:
+        `ParseExpression` returns `2`. `_currentToken` is `3`. `Evaluate` throws `FormatException`. Correct.
+
+    *   `()`:
+        `ParsePrimary` calls `ParseExpression`.
+        `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`.
+        `ParsePrimary` sees `)`. Throws `FormatException`. Correct.
+
+    *   `2+`:
+        `ParseExpression` calls `ParseTerm` (returns `2`).
+        `ParseExpression` sees `+`. Calls `ParseTerm`.
+        `ParseTerm` calls `ParseUnary` -> `ParsePower` -> `ParsePrimary`.
+        `ParsePrimary` sees `EOF`. Throws `FormatException`. Correct.
+
+    *   `2^-1`:
+        `ParsePower` -> `ParsePrimary(2)`, `Eat(Power)`, `ParsePower`
+        `ParsePower` -> `ParseUnary` -> `Eat(Minus)`, `ParseUnary` -> `ParsePower` -> `ParsePrimary(1)`
+        Result: `Math.Pow(2, -1)`. Correct.
+
+    Wait, one more check. The prompt says `2^-1` is `0.5`.
+    My grammar: `Power` -> `Primary ^ Power | Primary`.
+    If the input is `2^-1`, `ParsePower` will call `ParsePower` for the exponent.
+    The exponent `ParsePower` will call `ParseUnary`.
+    `ParseUnary` will handle the `-1`.
+    So `2 ^ (-1)`. Correct.
+
+    Wait, what if the input is `2^-2^2`?
+    `Power(2) ^ Power(-2^2)`
+    `Power(-2^2)` -> `Unary(-)` `Power(2^2)`
+    `Power(2^2)` -> `2^2` = `4`.
+    `Unary(-)` returns `-4`.
+    `Power` returns `2 ^ -4`.
+    This is consistent.
+
+    *   `2^3^2` is `2^(3^2) = 512`.
+    *   `2^-1` is `0.5`.
+    *   `-2^2` is `-4`.
+    *   `2*-3` is `-6`.
+    *   `--2` is `2`.
+    *   `2^-(-1)` is `2`.
+
+    All requirements met.
+
+    *   `double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture)` is good.
+    *   `Math.Pow(a, b)` is good.
+    *   `DivideByZeroException` is good.
+    *   `FormatException` is good.
+    *   `Whitespace` is ignored.
+    *   `Culture-invariant` is good.
+    *   `No external libraries` is good.
+    *   `No DataTable.Compute/Roslyn` is good.
+
+    One tiny detail: `2^-1`.
+    In my `ParsePower`:
+    ```csharp
+    public double ParsePower() {
+        double left = ParsePrimary();
+        if (_currentToken.Type == TokenType.Power) {
+            Eat(TokenType.Power);
+            double right = ParsePower(); // Right-associative
+            return Math.Pow(left, right);
+        }
+        return left;
+    }
+    ```
+    If the input is `2^-1`, `ParsePower` calls `ParsePrimary` (gets `2`), then `Eat(Power)`, then `ParsePower` (recursive).
+    The recursive `ParsePower` calls `ParsePrimary`.
+    But `ParsePrimary` only handles `Number` or `(`.
+    It *doesn't* handle `Unary`.
+    So `2^-1` will fail because `ParsePower` calls `ParsePrimary`, and `ParsePrimary` doesn't see a number or `(`. It sees `-`.
+    *Correction*: `ParsePower` should call `ParseUnary` for its exponent, not `ParsePrimary`.
+    Wait, if `ParsePower` calls `ParseUnary`, then `2^-1` works.
+    But if `ParsePower` calls `ParseUnary`, then `2^3^2` still works because `ParseUnary` will eventually call `ParsePower`.
+
+    Let's re-trace `2^3^2` with `ParsePower` calling `ParseUnary`:
+    `ParsePower` -> `ParsePrimary(2)`, `Eat(Power)`, `ParsePower`
+    `ParsePower` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary(3)`, `Eat(Power)`, `ParsePower`
+    `ParsePower` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary(2)`
+    Result: `2^(3^2)`. Correct.
+
+    Let's re-trace `2^-1` with `ParsePower` calling `ParseUnary`:
+    `ParsePower` -> `ParsePrimary(2)`, `Eat(Power)`, `ParsePower`
+    `ParsePower` -> `ParseUnary` -> `Eat(Minus)`, `ParseUnary` -> `ParsePower` -> `ParsePrimary(1)`
+    Result: `2^(-1)`. Correct.
+
+    Let's re-trace `-2^2` with `ParsePower` calling `ParseUnary`:
+    `ParseUnary` -> `Eat(Minus)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `ParsePrimary(2)`, `Eat(Power)`, `ParsePower` -> `ParsePrimary(2)`
+    Result: `-(2^2)`. Correct.
+
+    So the hierarchy is:
+    `Expression` -> `Term` -> `Unary` -> `Power` -> `Primary`
+    And `Power` -> `Primary ^ Power`? No, that's what I had before.
+    If `Power` calls `Unary`, then `Power` -> `Primary ^ Power` is not quite right.
+    It should be:
+    `Power` -> `Primary [ ^ Power ]`
+    Wait, if `Power` calls `Unary`, then `Power` can be `Primary ^ Power`.
+    But `Power` itself is called by `Unary`.
+    So `Unary` -> `Power`.
+    And `Power` -> `Primary ^ Power | Primary`.
+    This means `2^-1` would be `2 ^ (Unary(-1))`.
+    Wait, if `Power` calls `Primary`, it can't see the `-`.
+    If `Power` calls `Unary`, then `2^-1` works.
+    Let's try:
+    `Power` -> `Primary [ ^ Power ]`
+    Wait, if `Power` is `Primary ^ Power`, then the exponent is a `Power`.
+    If the exponent is a `Power`, and `Power` calls `Primary`, it still can't see the `-`.
+    The only way `2^-1` works is if the exponent can be a `Unary`.
+
+    Let's refine the grammar one more time:
+    `Expression` -> `Term` { (`+` | `-`) `Term` }
+    `Term` -> `Unary` { (`*` | `/`) `Unary` }
+    `Unary` -> (`+` | `-`) `Unary` | `Power`
+    `Power` -> `Primary` [ `^` `Power` ]
+    `Primary` -> `Number` | `(` `Expression` `)`
+
+    Wait, this is what I had! Let's re-trace `2^-1` *very* carefully.
+    `2^-1`
+    `ParseExpression` calls `ParseTerm`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` calls `ParsePower`.
+    `ParsePower` calls `ParsePrimary`.
+    `ParsePrimary` gets `2`.
+    `ParsePower` sees `^`.
+    `ParsePower` calls `ParsePower` (recursive) for the exponent.
+    The recursive `ParsePower` calls `ParsePrimary`.
+    `ParsePrimary` sees `-`.
+    `ParsePrimary` throws `FormatException`.
+    *Conclusion*: `ParsePower` must call `ParseUnary` for its exponent, not `ParsePower`.
+
+    Let's try this:
+    `Power` -> `Primary [ ^ Unary ]`
+    Wait, that's not right-associative.
+    `Power` -> `Primary [ ^ Power ]` is right-associative.
+    If `Power` is `Primary ^ Power`, and `Power` calls `Primary`, it's not right-associative for `Unary`.
+
+    Let's try this:
+    `Power` -> `Primary [ ^ Power ]`
+    `Unary` -> `+ Unary | - Unary | Power`
+    `Power` -> `Primary [ ^ Power ]`
+    Wait, if `Unary` calls `Power`, and `Power` calls `Primary`, then `Unary` can only be a prefix to a `Power`.
+    So `-2^2` is `-(2^2)`.
+    But `2^-1` is `2 ^ (something)`. That `something` must be a `Unary`.
+    So `Power` must be:
+    `Power` -> `Primary [ ^ Unary ]` --- No, that's not right-associative.
+    `Power` -> `Primary [ ^ Power ]` --- This is right-associative.
+    If `Power` is `Primary ^ Power`, then the exponent is a `Power`.
+    If `Power` is `Primary ^ Unary`, then it's not right-associative.
+
+    Wait! The only way to have `2^3^2` be right-associative AND `2^-1` be valid is:
+    `Power` -> `Primary [ ^ Power ]`
+    AND `Power` can also be `Unary`? No.
+
+    Let's look at the precedence again:
+    1. `Primary`
+    2. `Power` (Right-associative)
+    3. `Unary`
+    4. `Term`
+    5. `Expression`
+
+    If `Power` is higher than `Unary`, then `2^-1` is `(2^-)1` (invalid) or `2^(-1)`.
+    If `2^-1` is `2^(-1)`, then `Unary` is *part of* the `Power` operation.
+    This means `Power` must call `Unary`.
+
+    Let's try this grammar:
+    `Expression` -> `Term` { (`+` | `-`) `Term` }
+    `Term` -> `Unary` { (`*` | `/`) `Unary` }
+    `Unary` -> (`+` | `-`) `Unary` | `Power`
+    `Power` -> `Primary` [ `^` `Power` ]
+    `Primary` -> `Number` | `(` `Expression` `)`
+
+    Wait, I already tried this and said `2^-1` fails. Let's re-re-trace.
+    `2^-1`
+    `ParsePower` calls `ParsePrimary` (gets `2`).
+    `ParsePower` sees `^`.
+    `ParsePower` calls `ParsePower` (recursive).
+    The recursive `ParsePower` calls `ParsePrimary`.
+    `ParsePrimary` sees `-`.
+    `ParsePrimary` throws `FormatException`.
+
+    *Wait!* If `ParsePower` calls `ParseUnary` instead of `ParsePower` for the exponent:
+    `Power` -> `Primary [ ^ Unary ]`
+    Then `2^3^2` becomes `2^(3^2)`?
+    `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(3)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(2)`
+    Yes! It works!
+
+    Let's check `2^3^2` again:
+    `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(3)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(2)`
+    Result: `2 ^ (3 ^ 2)`.
+
+    Let's check `2^-1`:
+    `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `Eat(-)`, `ParseUnary` -> `ParsePower` -> `Primary(1)`
+    Result: `2 ^ (-1)`.
+
+    Let's check `-2^2`:
+    `ParseUnary` -> `Eat(-)`, `ParseUnary` -> `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary` -> `ParsePower` -> `Primary(2)`
+    Result: `-(2^2)`.
+
+    This is it! The grammar is:
+    `Expression` -> `Term` { (`+` | `-`) `Term` }
+    `Term` -> `Unary` { (`*` | `/`) `Unary` }
+    `Unary` -> (`+` | `-`) `Unary` | `Power`
+    `Power` -> `Primary` [ `^` `Unary` ]
+    `Primary` -> `Number` | `(` `Expression` `)`
+
+    Wait, `Power` -> `Primary [ ^ Unary ]` is not right-associative.
+    `2^3^2` would be `(2^3)^2`?
+    Let's trace `2^3^2` with `Power` -> `Primary [ ^ Unary ]`:
+    `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(3)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(2)`
+    Wait, it *is* right-associative because `ParseUnary` calls `ParsePower`.
+    Let's re-trace `2^3^2` with `Power` -> `Primary [ ^ Unary ]`:
+    `ParsePower` calls `ParsePrimary(2)`.
+    `ParsePower` sees `^`.
+    `ParsePower` calls `ParseUnary` for the exponent.
+    `ParseUnary` calls `ParsePower`.
+    `ParsePower` calls `ParsePrimary(3)`.
+    `ParsePower` sees `^`.
+    `ParsePower` calls `ParseUnary` for the exponent.
+    `ParseUnary` calls `ParsePower`.
+    `ParsePower` calls `ParsePrimary(2)`.
+    `ParsePower` returns `2`.
+    `ParseUnary` returns `2`.
+    `ParsePower` returns `3^2 = 9`.
+    `ParseUnary` returns `9`.
+    `ParsePower` returns `2^9 = 512`.
+    It *is* right-associative!
+
+    Wait, let me double-check that.
+    `Power` -> `Primary [ ^ Unary ]`
+    `2^3^2`
+    `ParsePower` (1)
+      `Primary` (2) -> `2`
+      `^`
+      `ParseUnary` (3)
+        `ParsePower` (4)
+          `Primary` (5) -> `3`
+          `^`
+          `ParseUnary` (6)
+            `ParsePower` (7)
+              `Primary` (8) -> `2`
+              (no `^`)
+              returns `2`
+            returns `2`
+          returns `3^2 = 9`
+        returns `9`
+      returns `2^9 = 512`
+    Yes! It works!
+
+    One last check: `2^3^2` with `Power` -> `Primary [ ^ Unary ]`.
+    Is it possible to have `2^3^2^4`?
+    Yes, it will be `2^(3^(2^4))`.
+
+    Wait, there's one potential issue. `2^3*4`.
+    `ParsePower` -> `Primary(2)`, `Eat(^)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(3)`
+    `ParsePower` returns `3`.
+    `ParseUnary` returns `3`.
+    `ParsePower` returns `2^3 = 8`.
+    `ParseTerm` -> `8`, `Eat(*)`, `ParseUnary` -> `ParsePower` -> `Primary(4)`
+    Result `8*4 = 32`.
+    Correct.
+
+    What about `2*3^4`?
+    `ParseTerm` -> `ParseUnary(2)`, `Eat(*)`, `ParseUnary`
+    `ParseUnary` -> `ParsePower` -> `Primary(3)`, `Eat(^)`, `ParseUnary` -> `ParsePower` -> `Primary(4)`
+    Result `2*(3^4) = 162`.
+    Correct.
+
+    Final Grammar:
+    `Expression` -> `Term` { (`+` | `-`) `Term` }
+    `Term` -> `Unary` { (`*` | `/`) `Unary` }
+    `Unary` -> (`+` | `-`) `Unary` | `Power`
+    `Power` -> `Primary` [ `^` `Unary` ]
+    `Primary` -> `Number` | `(` `Expression` `)`
+
+    Wait, `Power` -> `Primary [ ^ Unary ]` is right-associative *only if* `Unary` calls `Power`.
+    And `Unary` *does* call `Power`.
+    So it's all good.
+
+    *   `2^-1` -> `2 ^ (-1)`
+    *   `2^3^2` -> `2 ^ (3 ^ 2)`
+    *   `-2^2` -> `-(2^2)`
+    *   `2*-3` -> `2 * (-3)`
+    *   `--2` -> `-(-2)`
+    *   `2^-(-1)` -> `2 ^ (-(-1))`
+
+    All good.
+
+    Wait, one more: `2^3^2` is `2^(3^2)`.
+    My `ParsePower` is:
+    ```csharp
+    public double ParsePower() {
+        double left = ParsePrimary();
+        if (_currentToken.Type == TokenType.Power) {
+            Eat(TokenType.Power);
+            double right = ParseUnary(); // This is the key!
+            return Math.Pow(left, right);
+        }
+        return left;
+    }
+    ```
+    If `right = ParseUnary()`, then `2^3^2` will be `2^(3^2)`.
+    Let's trace:
+    `ParsePower` (1) calls `ParsePrimary` (2) -> `2`.
+    `ParsePower` (1) sees `^`.
+    `ParsePower` (1) calls `ParseUnary` (3).
+    `ParseUnary` (3) calls `ParsePower` (4).
+    `ParsePower` (4) calls `ParsePrimary` (5) -> `3`.
+    `ParsePower` (4) sees `^`.
+    `ParsePower` (4) calls `ParseUnary` (6).
+    `ParseUnary` (6) calls `ParsePower` (7).
+    `ParsePower` (7) calls `ParsePrimary` (8) -> `2`.
+    `ParsePower` (7) returns `2`.
+    `ParseUnary` (6) returns `2`.
+    `ParsePower` (4) returns `Math.Pow(3, 2) = 9`.
+    `ParseUnary` (3) returns `9`.
+    `ParsePower` (1) returns `Math.Pow(2, 9) = 512`.
+    Perfect.
+
+    *   `2^3^2` -> `512`
+    *   `2^-1` -> `0.5`
+    *   `-2^2` -> `-4`
+    *   `2*-3` -> `-6`
+    *   `--2` -> `2`
+    *   `2^-(-1)` -> `2`
+    *   `2^3*4` -> `32`
+    *   `2*3^4` -> `162`
+    *   `2+3*4` -> `14`
+    *   `2*3+4` -> `10`
+
+    Everything looks solid.
+
+    *   `2 3` -> `FormatException`
+    *   `3**2` -> `FormatException`
+    *   `2+` -> `FormatException`
+    *   `()` -> `FormatException`
+    *   `1.2.3` -> `FormatException`
+    *   `DivideByZeroException` -> `DivideByZeroException`
+
+    Wait, `2^-1` is `2 ^ (-1)`.
+    If the input is `2^-1`, the `Lexer` will return `2`, `^`, `-`, `1`.
+    `ParsePower` will call `ParseUnary` for the exponent.
+    `ParseUnary` will see `-` and call `ParseUnary` for the `1`.
+    `ParseUnary` will call `ParsePower` for the `1`.
+    `ParsePower` will call `ParsePrimary` for the `1`.
+    `ParsePrimary` will return `1`.
+    `ParseUnary` will return `-1`.
+    `ParsePower` will return `2 ^ -1`.
+    Perfect.
+
+    Wait, one more: `2^-3^2`.
+    `2 ^ (- (3^2))` = `2 ^ -9`.
+    `ParsePower` (1) -> `2`, `^`, `ParseUnary` (3)
+    `ParseUnary` (3) -> `-`, `ParseUnary` (4)
+    `ParseUnary` (4) -> `ParsePower` (5)
+    `ParsePower` (5) -> `3`, `^`, `ParseUnary` (6)
+    `ParseUnary` (6) -> `ParsePower` (7) -> `2`
+    `ParsePower` (5) returns `3^2 = 9`.
+    `ParseUnary` (4) returns `-9`.
+    `ParsePower` (1) returns `2^-9`.
+    Perfect.
+
+    Wait, what if the user meant `(2^-3)^2`?
+    They would have to write `(2^-3)^2`.
+    My parser handles that:
+    `ParsePrimary` -> `(` `ParseExpression` `)` -> `2^-3`.
+    `ParsePower` -> `(2^-3) ^ ParseUnary(2)`.
+    Perfect.

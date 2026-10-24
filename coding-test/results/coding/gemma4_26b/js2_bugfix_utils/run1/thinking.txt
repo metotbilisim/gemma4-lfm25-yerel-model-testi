@@ -1,0 +1,514 @@
+*   `parseQuery(qs)`:
+        *   Leading '?' is optional.
+        *   '+' means space.
+        *   Keys/values are percent-decoded.
+        *   Only the first '=' separates key and value.
+        *   Key without '=' gets value ''.
+        *   Empty segments (e.g., `&&`) are ignored.
+        *   Duplicate keys produce an array of values.
+    *   `deepEqual(a, b)`:
+        *   NaN === NaN.
+        *   Dates: same time, same type.
+        *   Objects: same own keys, equal values.
+        *   null: only equal to null.
+    *   `groupBy(items, keyFn)`:
+        *   Returns a Map.
+        *   Keys in first-seen order.
+        *   Values are arrays of items in original order.
+    *   `debounce(fn, wait)`:
+        *   Calls `fn` with latest args and latest `this`.
+        *   `cancel()`: cancels pending call.
+        *   `flush()`: invokes immediately if pending, returns result, else undefined.
+    *   `chunk(arr, size)`:
+        *   Splits into chunks of `size`.
+        *   Throws `RangeError` if `size` is not a positive integer.
+
+    *   `parseQuery(qs)`:
+        *   `qs.split('&')`: If `qs` is empty or has `&&`, it might produce empty strings.
+        *   `const [rawKey, rawValue] = part.split('=')`: If `part` is `a=b=c`, `rawKey` is `a`, `rawValue` is `b`. The documentation says "Only the first '=' separates key and value". `split('=')` with destructuring only takes the first two elements. If there are more '=', they are lost.
+        *   `decodeURIComponent(rawKey)`: Doesn't handle `+` as space.
+        *   `decodeURIComponent(rawValue || '')`: Doesn't handle `+` as space.
+        *   `if (key in result)`: If `key` is `toString`, `hasOwnProperty`, etc., this might fail or behave unexpectedly because it checks the prototype chain. Use `Object.prototype.hasOwnProperty.call(result, key)`.
+        *   `result[key] = [result[key], value]`: If a key appears 3 times, it becomes `[[val1, val2], val3]`. It should be `[val1, val2, val3]`.
+        *   Empty segments: `part.split('&')` on `a=1&&b=2` gives `['a=1', '', 'b=2']`. The loop processes `''`. `split('=')` on `''` gives `['']`. `key` becomes `''`. This is not ignored.
+
+    *   `deepEqual(a, b)`:
+        *   `NaN === NaN` is false. Need `Number.isNaN`.
+        *   `typeof null === 'object'`. If `a` is `null` and `b` is `{}`, `typeof a !== 'object'` is false, `typeof b !== 'object'` is false. Then `Object.keys(null)` throws an error.
+        *   `a instanceof Date && b instanceof Date`: This is okay, but if one is a Date and the other is not, it falls through to `Object.keys`.
+        *   `Object.keys(a)`: If `a` is `null`, this throws.
+
+    *   `groupBy(items, keyFn)`:
+        *   `items.forEach((item, i) => ...)`: This looks mostly correct. Map preserves insertion order.
+
+    *   `debounce(fn, wait)`:
+        *   `fn(...lastArgs)`: Doesn't preserve `this`.
+        *   `debounced.flush()`: Returns `fn(...lastArgs)`. If `fn` is asynchronous, this returns the promise, but the requirement says "invokes it immediately and returns fn's result". Usually, debounce is used for sync or async, but the `this` context is the main issue here.
+        *   `timer` management: `timer` is set by `setTimeout`. `clearTimeout(timer)` is used.
+
+    *   `chunk(arr, size)`:
+        *   `if (size <= 0)`: Doesn't check if `size` is an integer. `chunk([1], 0.5)` would pass the check but might cause infinite loops or weird behavior (though `i += 0.5` would eventually pass `arr.length`). The requirement says "positive integer".
+
+    *   **`parseQuery` Fixes:**
+        1.  Handle `+` as space: `str.replace(/\+/g, ' ')`.
+        2.  Handle multiple `=`: Use `indexOf('=')`.
+        3.  Ignore empty segments: `if (!part) continue;`.
+        4.  Fix array accumulation: `result[key] = Array.isArray(result[key]) ? [...result[key], value] : [result[key], value]`.
+        5.  Use `Object.prototype.hasOwnProperty.call` or check if `key` is a property of the object itself.
+        6.  Handle `decodeURIComponent` errors? (Not strictly required by prompt, but good practice. I'll stick to the requirements).
+
+    *   **`deepEqual` Fixes:**
+        1.  Handle `NaN`: `if (Number.isNaN(a) && Number.isNaN(b)) return true;`.
+        2.  Handle `null`: `if (a === null || b === null) return a === b;`.
+        3.  Handle `Date` vs non-`Date`: `if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();`.
+
+    *   **`debounce` Fixes:**
+        1.  Preserve `this`: `fn.apply(this, lastArgs)`.
+        2.  Wait, `debounced` is a function. When called as `obj.debounced()`, `this` should be `obj`.
+        3.  `timer` should be cleared in `flush`.
+
+    *   **`chunk` Fixes:**
+        1.  Check `!Number.isInteger(size)`.
+
+    *   `parseQuery`:
+        ```javascript
+        function parseQuery(qs) {
+          const result = {};
+          if (qs.startsWith('?')) qs = qs.slice(1);
+          if (!qs) return result; // Handle empty string
+          for (const part of qs.split('&')) {
+            if (!part) continue; // Ignore empty segments
+            const eqIndex = part.indexOf('=');
+            let rawKey, rawValue;
+            if (eqIndex === -1) {
+              rawKey = part;
+              rawValue = '';
+            } else {
+              rawKey = part.slice(0, eqIndex);
+              rawValue = part.slice(eqIndex + 1);
+            }
+            const decode = (s) => decodeURIComponent(s.replace(/\+/g, ' '));
+            const key = decode(rawKey);
+            const value = decode(rawValue);
+
+            if (Object.prototype.hasOwnProperty.call(result, key)) {
+              if (Array.isArray(result[key])) {
+                result[key].push(value);
+              } else {
+                result[key] = [result[key], value];
+              }
+            } else {
+              result[key] = value;
+            }
+          }
+          return result;
+        }
+        ```
+
+    *   `deepEqual`:
+        ```javascript
+        function deepEqual(a, b) {
+          if (a === b) return true;
+          if (Number.isNaN(a) && Number.isNaN(b)) return true;
+          if (a === null || b === null) return a === b;
+          if (typeof a !== 'object' || typeof b !== 'object') return false;
+          if (a instanceof Date || b instanceof Date) {
+            return (a instanceof Date && b instanceof Date) && a.getTime() === b.getTime();
+          }
+          if (Array.isArray(a) !== Array.isArray(b)) return false;
+          const keysA = Object.keys(a);
+          const keysB = Object.keys(b);
+          if (keysA.length !== keysB.length) return false;
+          for (const k of keysA) {
+            if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false;
+          }
+          return true;
+        }
+        ```
+
+    *   `debounce`:
+        ```javascript
+        function debounce(fn, wait) {
+          let timer = null;
+          let lastArgs;
+          let lastThis;
+          function debounced(...args) {
+            lastArgs = args;
+            lastThis = this;
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              fn.apply(lastThis, lastArgs);
+              timer = null;
+            }, wait);
+          }
+          debounced.cancel = () => {
+            clearTimeout(timer);
+            timer = null;
+          };
+          debounced.flush = () => {
+            if (timer) {
+              clearTimeout(timer);
+              const result = fn.apply(lastThis, lastArgs);
+              timer = null;
+              return result;
+            }
+          };
+          return debounced;
+        }
+        ```
+
+    *   `chunk`:
+        ```javascript
+        function chunk(arr, size) {
+          if (!Number.isInteger(size) || size <= 0) throw new RangeError('size must be a positive integer');
+          const out = [];
+          for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+          return out;
+        }
+        ```
+
+    *   `parseQuery`:
+        - `?a=1&b=two&a=3&flag&name=John%20Doe&x=a%2Bb+c`
+        - `a=1` -> `result.a = '1'`
+        - `b=two` -> `result.b = 'two'`
+        - `a=3` -> `result.a = ['1', '3']`
+        - `flag` -> `result.flag = ''`
+        - `name=John%20Doe` -> `result.name = 'John Doe'`
+        - `x=a%2Bb+c` -> `x` value is `a+b c` (decoded `+` to space, then `%2B` to `+`). Wait, `decodeURIComponent('a+b+c')` is `a+b+c`. The spec says `+` means space. So `a+b+c` becomes `a b c`.
+        - Let's re-check `x=a%2Bb+c`.
+          - `rawKey` = `x`
+          - `rawValue` = `a%2Bb+c`
+          - `rawValue.replace(/\+/g, ' ')` -> `a%2Bb c`
+          - `decodeURIComponent('a%2Bb c')` -> `a+b c`. Correct.
+
+    *   `deepEqual`:
+        - `NaN, NaN` -> `true`.
+        - `null, null` -> `true`.
+        - `null, {}` -> `false`.
+        - `Date, Date` -> `a.getTime() === b.getTime()`.
+        - `Date, {}` -> `false`.
+        - `[1], [1]` -> `true`.
+        - `{a:1}, {a:1}` -> `true`.
+        - `{a:1}, {b:1}` -> `false`.
+
+    *   `debounce`:
+        - `fn.apply(lastThis, lastArgs)` handles the `this` context requirement.
+        - `flush` returns the result.
+
+    *   `chunk`:
+        - `size = 0` -> `RangeError`.
+        - `size = 1.5` -> `RangeError`.
+        - `size = 2` -> `[[1,2],[3,4],[5]]`.
+
+    *   `parseQuery`:
+        - `qs.split('&')` on `""` returns `[""]`.
+        - `part` is `""`. `if (!part) continue;` handles this.
+        - `qs.split('&')` on `"a=1&"` returns `["a=1", ""]`.
+        - `part` is `""`. `if (!part) continue;` handles this.
+        - `qs.split('&')` on `"&a=1"` returns `["", "a=1"]`.
+        - `part` is `""`. `if (!part) continue;` handles this.
+
+    *   `deepEqual`:
+        - `Object.keys(a)` for `a = []` is `[]`.
+        - `Object.keys(a)` for `a = {}` is `[]`.
+        - `deepEqual([], {})`?
+          - `a === b` (false)
+          - `NaN` (false)
+          - `null` (false)
+          - `typeof` (both object)
+          - `Date` (false)
+          - `Array.isArray(a) !== Array.isArray(b)` -> `true !== false` -> returns `false`. Correct.
+
+    *   `debounce`:
+        - If `fn` is called via `flush`, `timer` must be cleared.
+        - If `fn` is called via `setTimeout`, `timer` should be cleared/reset.
+
+    *   `parseQuery`:
+        - `const [rawKey, rawValue] = part.split('=');` -> This was the bug for `k=a=b`.
+        - `decodeURIComponent(rawValue || '')` -> This was the bug for `+` as space.
+        - `result[key] = [result[key], value]` -> This was the bug for 3+ values.
+        - `key in result` -> This was the bug for prototype properties.
+        - `qs.split('&')` with empty segments -> This was the bug for `&&`.
+
+    *   `deepEqual`:
+        - `NaN` equality.
+        - `null` handling (preventing `Object.keys(null)`).
+        - `Date` vs non-`Date` handling.
+        - `Object.keys` check for existence of key in `b`.
+
+    *   `debounce`:
+        - `this` context.
+        - `flush` returning result.
+
+    *   `chunk`:
+        - `size` must be a positive integer.
+
+    *   `parseQuery`:
+        - `const [rawKey, rawValue] = part.split('=')` is bad.
+        - `const eqIndex = part.indexOf('=')` is better.
+        - `const key = decodeURIComponent(rawKey.replace(/\+/g, ' '))`
+        - `const value = decodeURIComponent(rawValue.replace(/\+/g, ' '))`
+
+    *   Wait, `parseQuery` documentation says: "A key without '=' gets the value '' (empty string)".
+        - If `part` is `"flag"`, `indexOf('=')` is `-1`.
+        - `rawKey = part` ("flag"), `rawValue = ''`.
+        - `decodeURIComponent('flag')` -> `"flag"`.
+        - `decodeURIComponent('')` -> `""`.
+        - Correct.
+
+    *   Wait, `parseQuery` documentation says: "Only the first '=' separates key and value ("k=a=b" gives value "a=b")".
+        - If `part` is `"k=a=b"`, `indexOf('=')` is `1`.
+        - `rawKey = part.slice(0, 1)` -> `"k"`.
+        - `rawValue = part.slice(2)` -> `"a=b"`.
+        - Correct.
+
+    *   `deepEqual` check:
+        - `if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false;`
+        - This is important because `keysA` and `keysB` have the same length, but `k` might be in `a` but not in `b`.
+
+    *   `debounce` check:
+        - `debounced.flush` returns `fn(...lastArgs)`.
+        - If `fn` is `() => 5`, `flush` returns `5`.
+        - If `timer` is null, `flush` returns `undefined`.
+        - Correct.
+
+    *   `chunk` check:
+        - `Number.isInteger(size)` is necessary.
+
+    *   `parseQuery`:
+        - `if (qs.startsWith('?')) qs = qs.slice(1);`
+        - `if (!qs) return {};` (If `qs` was `?` or `""`)
+        - `for (const part of qs.split('&'))`
+        - `if (!part) continue;`
+        - `const eqIndex = part.indexOf('=');`
+        - `let rawKey, rawValue;`
+        - `if (eqIndex === -1) { rawKey = part; rawValue = ''; } else { rawKey = part.slice(0, eqIndex); rawValue = part.slice(eqIndex + 1); }`
+        - `const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));`
+        - `const value = decodeURIComponent(rawValue.replace(/\+/g, ' '));`
+        - `if (Object.prototype.hasOwnProperty.call(result, key)) { ... }`
+
+    *   Wait, one detail in `parseQuery`: `decodeURIComponent` can throw if the string is not a valid percent-encoded string. The prompt doesn't say to handle it, so I'll assume the input is valid or let it throw.
+
+    *   `deepEqual` check:
+        - `if (a === b) return true;`
+        - `if (Number.isNaN(a) && Number.isNaN(b)) return true;`
+        - `if (a === null || b === null) return a === b;`
+        - `if (typeof a !== 'object' || typeof b !== 'object') return false;`
+        - `if (a instanceof Date || b instanceof Date) return (a instanceof Date && b instanceof Date) && a.getTime() === b.getTime();`
+        - `if (Array.isArray(a) !== Array.isArray(b)) return false;`
+        - `const keysA = Object.keys(a);`
+        - `const keysB = Object.keys(b);`
+        - `if (keysA.length !== keysB.length) return false;`
+        - `for (const k of keysA) { if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false; }`
+        - `return true;`
+
+    *   `debounce` check:
+        - `let timer = null;`
+        - `let lastArgs;`
+        - `let lastThis;`
+        - `function debounced(...args) { lastArgs = args; lastThis = this; clearTimeout(timer); timer = setTimeout(() => { fn.apply(lastThis, lastArgs); timer = null; }, wait); }`
+        - `debounced.cancel = () => { clearTimeout(timer); timer = null; };`
+        - `debounced.flush = () => { if (timer) { clearTimeout(timer); const res = fn.apply(lastThis, lastArgs); timer = null; return res; } };`
+
+    *   `chunk` check:
+        - `if (!Number.isInteger(size) || size <= 0) throw new RangeError('size must be a positive integer');`
+
+    *   `parseQuery`:
+        - `+` to space.
+        - `k=a=b` -> `a=b`.
+        - `flag` -> `''`.
+        - `&&` ignored.
+        - `a=1&a=2` -> `[1, 2]`.
+        - `a=1&a=2&a=3` -> `[1, 2, 3]`. (My logic: `if (Array.isArray(result[key])) { result[key].push(value); } else { result[key] = [result[key], value]; }`)
+        - `?` optional.
+
+    *   `deepEqual`:
+        - `NaN` === `NaN`.
+        - `Date` equality.
+        - `null` equality.
+        - `Object` equality (own keys, values).
+
+    *   `groupBy`:
+        - `Map` preserves insertion order.
+        - `items.forEach((item, i) => ...)` preserves original order.
+
+    *   `debounce`:
+        - `this` context.
+        - `cancel`.
+        - `flush` returns result.
+
+    *   `chunk`:
+        - `RangeError` for non-positive integer.
+
+    *   `parseQuery`:
+        - `a=1&a=2&a=3`
+        - 1st: `result.a = '1'`
+        - 2nd: `result.a = ['1', '2']`
+        - 3rd: `result.a = ['1', '2', '3']`
+        - Correct.
+
+    *   `deepEqual`:
+        - `deepEqual({a:1}, {a:1, b:2})`
+        - `keysA.length` (1) !== `keysB.length` (2) -> `false`.
+        - Correct.
+
+    *   `debounce`:
+        - `lastThis` and `lastArgs` are updated on every call.
+        - `timer` is cleared on every call.
+        - `setTimeout` is called with `wait`.
+        - `fn.apply(lastThis, lastArgs)` is called when timer expires.
+        - `flush` calls `fn.apply(lastThis, lastArgs)` and clears `timer`.
+        - Correct.
+
+    *   `chunk`:
+        - `chunk([1, 2, 3], 2)`
+        - `i=0`: `out.push([1, 2])`
+        - `i=2`: `out.push([3])`
+        - `i=4`: loop ends.
+        - Correct.
+
+    *   `parseQuery`: `decodeURIComponent(rawKey.replace(/\+/g, ' '))`.
+    *   `deepEqual`: `if (a === null || b === null) return a === b;` (This handles `null === null` and `null === {}` correctly).
+    *   `debounce`: `fn.apply(lastThis, lastArgs)`.
+    *   `chunk`: `!Number.isInteger(size) || size <= 0`.
+
+    Wait, one small thing in `parseQuery`:
+    If `qs` is `?`, `qs.slice(1)` is `""`. `"".split('&')` is `[""]`.
+    `for (const part of [""])`
+    `if (!part) continue;`
+    `result` remains `{}`. Correct.
+
+    If `qs` is `""`. `"".split('&')` is `[""]`.
+    `for (const part of [""])`
+    `if (!part) continue;`
+    `result` remains `{}`. Correct.
+
+    Wait, `decodeURIComponent` can throw if the input is not a valid URI component. The prompt doesn't mention error handling, so I'll leave it as is.
+
+    Wait, `deepEqual` with `NaN`:
+    `Number.isNaN(a) && Number.isNaN(b)`
+    If `a` is `NaN` and `b` is `NaN`, `a === b` is false, but `Number.isNaN(a) && Number.isNaN(b)` is true. Correct.
+
+    Wait, `deepEqual` with `Date`:
+    If `a` is `new Date(0)` and `b` is `new Date(0)`, `a === b` is false (different objects).
+    `a instanceof Date && b instanceof Date` is true.
+    `a.getTime() === b.getTime()` is true.
+    Correct.
+
+    If `a` is `new Date(0)` and `b` is `123456789`:
+    `a instanceof Date || b instanceof Date` is true.
+    `a instanceof Date && b instanceof Date` is false.
+    Returns `false`. Correct.
+
+    Wait, `deepEqual` with `null`:
+    If `a` is `null` and `b` is `null`:
+    `a === b` is true. Returns `true`. Correct.
+    If `a` is `null` and `b` is `{}`:
+    `a === b` is false.
+    `a === null || b === null` is true.
+    `a === b` is false. Returns `false`. Correct.
+
+    Wait, `deepEqual` with `typeof`:
+    If `a` is `null` and `b` is `null`, `a === b` is true.
+    If `a` is `null` and `b` is `undefined`:
+    `a === b` is false.
+    `a === null || b === null` is true.
+    `a === b` is false. Returns `false`. Correct.
+
+    Wait, `deepEqual` with `Array.isArray`:
+    If `a` is `[]` and `b` is `{}`:
+    `a === b` is false.
+    `a === null || b === null` is false.
+    `typeof a` and `typeof b` are both `'object'`.
+    `a instanceof Date` is false.
+    `Array.isArray(a)` is true, `Array.isArray(b)` is false.
+    `true !== false` is true. Returns `false`. Correct.
+
+    One more check on `parseQuery`'s `key in result`:
+    If `qs` is `toString=1`, `key` is `toString`.
+    `'toString' in {}` is true.
+    `result['toString'] = '1'` would overwrite the prototype's `toString`? No, it just adds a property to the object.
+    But `if (key in result)` would be true for `toString`.
+    If `key` is `toString`, `result[key]` would be `result.toString` (the function).
+    `result[key] = [result[key], value]` would make `result.toString` an array.
+    This is why `Object.prototype.hasOwnProperty.call(result, key)` is safer.
+
+    Wait, `result[key] = [result[key], value]` in the original code was also problematic for the same reason.
+    If `key` is `toString`, `result[key]` is `function toString() { [native code] }`.
+    `result[key] = [result[key], value]` would make `result.toString = [function toString() { [native code] }, '1']`.
+    This is actually fine for a plain object, but `key in result` is the part that checks the prototype.
+
+    Let's refine `parseQuery`'s `key in result` check:
+    ```javascript
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      if (Array.isArray(result[key])) {
+        result[key].push(value);
+      } else {
+        result[key] = [result[key], value];
+      }
+    } else {
+      result[key] = value;
+    }
+    ```
+    This is solid.
+
+    Final check on `debounce`:
+    The `timer = null` in `setTimeout` and `flush` is a good way to track if a call is pending.
+    `debounced.flush` returns `fn.apply(lastThis, lastArgs)`.
+    If `timer` is `null`, it returns `undefined`.
+    This matches "if a call is pending, invokes it immediately and returns fn's result; otherwise does nothing and returns undefined."
+
+    Final check on `chunk`:
+    `if (!Number.isInteger(size) || size <= 0)`
+    If `size` is `2.5`, `Number.isInteger(2.5)` is false.
+    If `size` is `0`, `size <= 0` is true.
+    If `size` is `-1`, `size <= 0` is true.
+    All correct.
+
+    Wait, `parseQuery` `decodeURIComponent` and `replace`:
+    `const key = decodeURIComponent(rawKey.replace(/\+/g, ' '));`
+    If `rawKey` is `a+b`, `replace` makes it `a b`, `decodeURIComponent` makes it `a b`.
+    If `rawKey` is `a%2Bb`, `replace` makes it `a%2Bb`, `decodeURIComponent` makes it `a+b`.
+    This is the correct way to handle `+` as space.
+
+    One last thing: `parseQuery` `result[key] = [result[key], value]` vs `result[key] = [result[key], value]`.
+    If `result[key]` is already an array, we should push to it.
+    If it's a single value, we should turn it into an array.
+    My code:
+    ```javascript
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      if (Array.isArray(result[key])) {
+        result[key].push(value);
+      } else {
+        result[key] = [result[key], value];
+      }
+    } else {
+      result[key] = value;
+    }
+    ```
+    This is correct.
+
+    Wait, `debounce` `lastArgs` and `lastThis`:
+    If `debounced` is called, `lastArgs` and `lastThis` are updated.
+    If `flush` is called, it uses the most recent `lastArgs` and `lastThis`.
+    If `cancel` is called, it just clears the timer.
+    If `setTimeout` finishes, it uses the `lastArgs` and `lastThis` that were set when `debounced` was *last* called.
+    This is correct.
+
+    Wait, `debounce` `timer = null` in `setTimeout`:
+    ```javascript
+    timer = setTimeout(() => {
+      fn.apply(lastThis, lastArgs);
+      timer = null;
+    }, wait);
+    ```
+    This is important so that `flush` knows if a timer is actually pending.
+
+    Wait, `debounce` `flush` returns `fn.apply(lastThis, lastArgs)`.
+    If `fn` is an async function, it returns a promise. The requirement says "returns fn's result". For an async function, the result is a promise. This is fine.
+
+    One more check on `parseQuery`:
+    `if (qs.startsWith('?')) qs = qs.slice(1);`
+    If `qs` is `?a=1`, `qs` becomes `a=1`.
+    If `qs` is `a=1`, `qs` stays `a=1`.
+    Correct.

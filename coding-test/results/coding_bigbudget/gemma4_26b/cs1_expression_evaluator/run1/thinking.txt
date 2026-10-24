@@ -1,0 +1,1407 @@
+*   Namespace: `Bench`
+    *   Class: `ExpressionEvaluator` (static)
+    *   Method: `public static double Evaluate(string expression)`
+    *   Language/Framework: C# (.NET 10)
+    *   Features:
+        *   Numbers: Integers, decimals (`3.14`, `.5`).
+        *   Operators: `+`, `-`, `*`, `/`, `^`.
+        *   Parentheses: `(`, `)`.
+        *   Unary: `+`, `-`.
+        *   Precedence:
+            1.  `^` (Right-associative, highest).
+            2.  Unary `+`/`-` (Weaker than `^`, but allowed after `^`).
+            3.  `*`, `/` (Left-associative).
+            4.  `+`, `-` (Left-associative).
+        *   Culture: Invariant (use `CultureInfo.InvariantCulture`).
+        *   Error Handling:
+            *   `FormatException`: Empty/whitespace, unknown chars, mismatched parens, missing operands, consecutive numbers, doubled binary ops, malformed numbers.
+            *   `DivideByZeroException`: Division by zero.
+        *   Constraints: No `DataTable.Compute`, no Roslyn, no external libs, no `Main`.
+
+    *   The Shunting-Yard algorithm (by Dijkstra) is perfect for converting infix notation to Reverse Polish Notation (RPN) or evaluating it directly using two stacks (one for values, one for operators).
+    *   Given the specific precedence rules (especially the unary vs power rule), I need to be careful.
+
+    *   *Unary vs Binary:* A `-` or `+` is unary if it's at the start of the expression or follows an operator or an opening parenthesis.
+    *   *Precedence Table:*
+        *   `^`: Precedence 4 (Right-associative)
+        *   Unary `+`/`-`: Precedence 3 (Right-associative/Unary)
+        *   `*`, `/`: Precedence 2 (Left-associative)
+        *   `+`, `-`: Precedence 1 (Left-associative)
+
+    *Wait*, the requirement says: "Unary minus/plus binds weaker than `^` (`-2^2` = -4)".
+    Standard math: $-2^2 = -(2^2) = -4$.
+    If unary was stronger than `^`, it would be $(-2)^2 = 4$.
+    So, `^` is higher than unary.
+    However, "a unary sign is allowed directly after `^` (`2^-1` = 0.5)". This implies that in the sequence `^ -`, the `-` is treated as a unary operator that is part of the exponentiation process or simply that the parser recognizes the unary sign.
+
+    Let's refine the precedence:
+    1. `^` (Precedence 4, Right)
+    2. Unary `+`, `-` (Precedence 3, Right)
+    3. `*`, `/` (Precedence 2, Left)
+    4. `+`, `-` (Precedence 1, Left)
+
+    *Wait*, if unary is precedence 3 and `^` is 4, then `-2^2` is evaluated as `-(2^2)`. This matches the requirement.
+    If I have `2^-1`, the `^` is evaluated, but it needs an operand. In RPN, `2 -1 ^` would mean `2` and `-1` are operands for `^`.
+
+    *   Tokenize the string into numbers, operators, and parentheses.
+    *   Handle whitespace.
+    *   Identify if `+` or `-` is unary or binary.
+
+    *Token Types:*
+    - `Number`
+    - `Operator` (`+`, `-`, `*`, `/`, `^`)
+    - `LeftParen` (`(`)
+    - `RightParen` (`)`)
+    - `UnaryPlus`
+    - `UnaryMinus`
+
+    *Tokenization Logic:*
+    Iterate through the string.
+    - If digit or `.`: Read the whole number. Check for multiple dots.
+    - If `+` or `-`: Check if it's unary. It's unary if:
+        - It's the first token.
+        - The previous token was an operator or `(`.
+    - If `*`, `/`, `^`: Binary operators.
+    - If `(` or `)`: Parentheses.
+
+    *Validation during Tokenization:*
+    - Check for invalid characters.
+    - Check for malformed numbers (e.g., `1.2.3`).
+    - Check for consecutive numbers (e.g., `2 3`).
+
+    *Validation during Evaluation (Shunting-Yard/Stack):*
+    - Check for mismatched parentheses.
+    - Check for missing operands (e.g., `2 +`).
+    - Check for doubled binary operators (e.g., `2 ++ 3` - though `++` might be seen as unary, the prompt says "doubled binary operators (`3**2`)").
+
+    *   `Stack<double> values`
+    *   `Stack<string> operators`
+
+    *Rules for Shunting-Yard:*
+    1. If token is number: push to `values`.
+    2. If token is `(`: push to `operators`.
+    3. If token is `)`: pop operators and apply until `(` is found. If no `(` found, throw `FormatException`.
+    4. If token is operator `op1`:
+       While `operators` is not empty and top is not `(` and (`prec(top) > prec(op1)` or (`prec(top) == prec(op1)` and `op1` is left-associative)):
+           pop `op`, apply to `values`.
+       push `op1`.
+
+    *Handling Unary:*
+    Treat unary `+` and `-` as distinct operators with higher precedence than binary `+` and `-`, but lower than `^`.
+
+    *Wait, let's re-check the precedence requirement:*
+    `^` is highest.
+    Unary is weaker than `^`.
+    `*` and `/` are next.
+    `+` and `-` are lowest.
+
+    Precedence levels:
+    - `^`: 4 (Right)
+    - Unary `+`/`-`: 3 (Right)
+    - `*`/`/`: 2 (Left)
+    - `+`/`-`: 1 (Left)
+
+    *Example: `-2^2`*
+    1. `-` (unary) -> push to ops.
+    2. `2` -> push to values.
+    3. `^` -> `prec(^)=4`, `prec(unary)=3`. `4 > 3`, so don't pop unary. Push `^`.
+    4. `2` -> push to values.
+    5. End of expression:
+       - Pop `^`: `values = [2^2] = [4]`.
+       - Pop `-`: `values = [-4]`.
+    Result: `-4`. Correct.
+
+    *Example: `2^-1`*
+    1. `2` -> push to values.
+    2. `^` -> push to ops.
+    3. `-` (unary) -> `prec(unary)=3`, `prec(^)=4`. `4 > 3`, so don't pop `^`. Push `-`.
+    4. `1` -> push to values.
+    5. End:
+       - Pop `-`: `values = [-1]`.
+       - Pop `^`: `values = [2^-1] = [0.5]`.
+    Result: `0.5`. Correct.
+
+    *Example: `2^3^2`*
+    1. `2` -> values.
+    2. `^` -> ops.
+    3. `3` -> values.
+    4. `^` -> `prec(^)=4`, `prec(top)=4`. `^` is right-associative. Don't pop. Push `^`.
+    5. `2` -> values.
+    6. End:
+       - Pop `^`: `3^2 = 9`.
+       - Pop `^`: `2^9 = 512`.
+    Result: `512`. Correct.
+
+    *   `2 3`: During tokenization, if we see a number and the previous token was a number or `)`, throw `FormatException`.
+    *   `3**2`: During tokenization, if we see a binary operator and the previous token was a binary operator, throw `FormatException`.
+    *   `2+`: After processing all tokens, if the `values` stack doesn't have exactly one element or the operator stack is not empty (and doesn't resolve), throw `FormatException`.
+    *   `()`: Empty parentheses. If `(` is followed immediately by `)`, throw `FormatException`.
+    *   `1.2.3`: During number parsing, if multiple dots are found, throw `FormatException`.
+
+    *   `double.Parse(s, CultureInfo.InvariantCulture)`
+    *   `Math.Pow(a, b)`
+    *   `Math.Abs` (not needed)
+    *   `DivideByZeroException` (manual check: `if (b == 0) throw new DivideByZeroException();`)
+
+    *   `List<Token>`
+    *   `Token` struct/class: `Type`, `Value`.
+    *   `TokenType`: `Number`, `Operator`, `LeftParen`, `RightParen`, `UnaryPlus`, `UnaryMinus`.
+
+    *Refined Tokenizer:*
+    ```csharp
+    int i = 0;
+    while (i < expression.Length) {
+        char c = expression[i];
+        if (char.IsWhiteSpace(c)) { i++; continue; }
+
+        if (char.IsDigit(c) || c == '.') {
+            // Parse number
+            // Check for multiple dots
+            // Check for invalid number format
+        } else if (c == '(') {
+            // LeftParen
+        } else if (c == ')') {
+            // RightParen
+        } else if (c == '+' || c == '-' || c == '*' || c == '/' || c == '^') {
+            // Determine if unary or binary
+            // Binary if: not at start AND previous token was not '(' and previous token was not an operator
+        } else {
+            throw new FormatException("Unknown character");
+        }
+    }
+    ```
+
+    *Wait, "doubled binary operators (`3**2`)"*:
+    If I have `3 * -2`, the `-` is unary. This is allowed.
+    If I have `3 * / 2`, the `/` is binary and follows a binary operator. This is NOT allowed.
+    So, a `+` or `-` can be unary if it follows an operator or `(`.
+    A `*`, `/`, or `^` can *never* be unary.
+    If a `*`, `/`, or `^` follows an operator or `(`, it's a `FormatException`.
+
+    *Revised Tokenizer Logic:*
+    - `lastToken` variable to track the previous token type.
+    - `Number`: Allowed if `lastToken` is `None`, `)`, or `Number`.
+    - `Binary Op` (`*`, `/`, `^`): Allowed if `lastToken` is `Number` or `)`.
+    - `Unary Op` (`+`, `-`): Allowed if `lastToken` is `None`, `(`, or `Operator`.
+    - `(`: Allowed if `lastToken` is `None`, `(`, or `Operator`.
+    - `)`: Allowed if `lastToken` is `Number` or `)`.
+
+    *Wait, what about `2^-1`?*
+    - `2` (Number)
+    - `^` (Binary Op) - allowed because `lastToken` is `Number`.
+    - `-` (Unary Op) - allowed because `lastToken` is `Operator`.
+    - `1` (Number) - allowed because `lastToken` is `Unary Op`.
+
+    *What about `2--1`?*
+    - `2` (Number)
+    - `-` (Binary Op)
+    - `-` (Unary Op) - allowed because `lastToken` is `Operator`.
+    - `1` (Number)
+
+    *What about `2 3`?*
+    - `2` (Number)
+    - `3` (Number) - NOT allowed because `lastToken` is `Number`.
+
+    *What about `3**2`?*
+    - `3` (Number)
+    - `*` (Binary Op)
+    - `*` (Binary Op) - NOT allowed because `lastToken` is `Operator` and `*` is not unary.
+
+    *   `Number`: Precedence 0 (not used in operator stack)
+    *   `+`, `-` (Binary): Precedence 1, Left
+    *   `*`, `/` (Binary): Precedence 2, Left
+    *   `^` (Binary): Precedence 4, Right
+    *   `+`, `-` (Unary): Precedence 3, Right
+
+    *Wait, the requirement says:* "Unary minus/plus binds weaker than `^` (`-2^2` = -4)".
+    My precedence: `^` is 4, Unary is 3.
+    So `^` is higher. This is correct.
+
+    *Wait, the requirement says:* "a unary sign is allowed directly after `^` (`2^-1` = 0.5)".
+    My logic: `^` is binary, `-` is unary.
+    In Shunting-Yard:
+    `2` (val: 2)
+    `^` (op: ^, prec 4)
+    `-` (op: unary -, prec 3)
+    `1` (val: 1)
+    Process:
+    - `^` is on stack.
+    - `-` comes. `prec(-) < prec(^)`? No, `3 < 4`.
+    - Wait, the Shunting-Yard rule: "While `prec(top) > prec(op1)` or (`prec(top) == prec(op1)` and `op1` is left-associative)".
+    - `prec(top)` is 4 (`^`). `prec(op1)` is 3 (`-`).
+    - `4 > 3` is true. So we pop `^`?
+    - If we pop `^`, we need two operands. But we only have one (`2`).
+    - This is the classic problem with Shunting-Yard and unary operators.
+
+    *Correct Shunting-Yard for Unary:*
+    Unary operators are usually treated as having high precedence, but the requirement specifically says they are *weaker* than `^`.
+    If we treat unary `-` as an operator that takes one operand:
+    When we encounter `-` (unary):
+    - It's an operator.
+    - `prec(unary -) = 3`.
+    - `top` is `^` (prec 4).
+    - `4 > 3`, so we *should* pop `^`. But `^` needs two operands.
+    - This means the `^` cannot be popped until its second operand is available.
+
+    *Alternative approach:*
+    Standard Shunting-Yard handles unary by treating them as operators that only pop one value.
+    The issue is the "precedence" rule.
+    If `-` is precedence 3 and `^` is precedence 4:
+    In `2^-1`:
+    1. `2` -> `values: [2]`
+    2. `^` -> `ops: [^]`
+    3. `-` (unary) -> `prec(unary) < prec(^)`.
+       If we follow the rule "pop if `prec(top) > prec(new)`", we pop `^`.
+       But `^` needs two values. This is why unary operators are usually given *higher* precedence than binary operators in most implementations, OR the parser is designed to handle them.
+
+    *Let's re-read:* "Unary minus/plus binds weaker than `^` (`-2^2` = -4)".
+    This means `-2^2` is `-(2^2)`.
+    In RPN, this is `2 2 ^ -`.
+    To get `2 2 ^ -` from `-2^2`:
+    - `-` is encountered. It's unary.
+    - `2` is encountered.
+    - `^` is encountered.
+    - `2` is encountered.
+    - End of string.
+    - Pop `^`: `2^2 = 4`.
+    - Pop `-`: `-4`.
+
+    This works *if* we don't pop the unary operator when we see the `^`.
+    The rule is: `While (prec(top) > prec(new_op) OR (prec(top) == prec(new_op) AND left_assoc))`.
+    If `top` is `-` (unary, prec 3) and `new_op` is `^` (prec 4):
+    `3 > 4` is false. `3 == 4` is false.
+    So we *don't* pop `-`. We push `^`.
+    Stack: `ops: [-, ^]`.
+    Then `2` is pushed to values.
+    End:
+    - Pop `^`: `2^2 = 4`.
+    - Pop `-`: `-4`.
+    This works!
+
+    *Wait, let's check `2^-1` again:*
+    1. `2` -> `values: [2]`
+    2. `^` -> `ops: [^]`
+    3. `-` (unary) -> `prec(top)=4`, `prec(new)=3`.
+       `4 > 3` is true.
+       So we pop `^`.
+       But `^` needs two operands. `values` only has `[2]`.
+       *CRASH*.
+
+    *Wait!* The rule "pop if `prec(top) > prec(new)`" is for *binary* operators.
+    For unary operators, the logic is slightly different.
+    Actually, the simplest way to handle this is:
+    A unary operator is just an operator that takes one operand.
+    The precedence rule `prec(top) > prec(new)` *must* be applied.
+    If `top` is `^` and `new` is unary `-`, and `prec(^) > prec(-)`, then `^` *must* be popped.
+    But `^` cannot be popped because it's missing an operand.
+    *Conclusion:* The only way `2^-1` works is if the unary `-` is treated as having *higher* precedence than `^`, OR if the `^` is not popped.
+
+    *Let's re-examine the requirement:*
+    "Unary minus/plus binds weaker than `^` (`-2^2` = -4), but a unary sign is allowed directly after `^` (`2^-1` = 0.5)."
+    If `-2^2` is `-4`, then `^` is evaluated before `-`.
+    If `2^-1` is `0.5`, then `-1` is evaluated before `^`.
+    This is a contradiction in standard precedence rules.
+    If `^` is higher than `-`, then `-2^2` is `-(2^2)`.
+    If `^` is higher than `-`, then `2^-1` is `2^(-1)`.
+    In the second case, the `-` is *inside* the exponent.
+    In the first case, the `-` is *outside* the power.
+
+    *Wait, I see!*
+    In `2^-1`, the `-` is an operand for `^`.
+    In `-2^2`, the `-` is an operator applied to the result of `2^2`.
+    This is exactly how precedence works.
+    The Shunting-Yard algorithm *does* handle this if you treat unary operators as having a specific precedence.
+
+    Let's trace `2^-1` again with `prec(unary) = 3` and `prec(^) = 4`:
+    1. `2` (val)
+    2. `^` (op, prec 4)
+    3. `-` (unary op, prec 3)
+    4. `1` (val)
+    5. End of string.
+    6. Pop `-`: `values: [2, -1]`? No, unary `-` is an operator.
+    When we encounter `-` (unary), we push it to the `ops` stack.
+    `ops: [^, -]`.
+    Wait, the rule `prec(top) > prec(new)`:
+    `top` is `^` (4). `new` is `-` (3).
+    `4 > 3` is true.
+    So we pop `^`.
+    But `^` needs two operands. `values` only has `[2]`.
+    This is the problem.
+
+    *How to fix:*
+    The Shunting-Yard algorithm needs to know if an operator is unary or binary.
+    If we encounter a unary operator, it's like any other operator.
+    The only way `2^-1` works is if the `^` is *not* popped by the unary `-`.
+    This happens if `prec(unary -) >= prec(^)`.
+    But the requirement says `unary -` is *weaker* than `^`.
+
+    *Wait!* I'm overthinking. Let's look at how `2^-1` is parsed in most calculators.
+    In `2^-1`, the `-` is part of the exponent.
+    In Shunting-Yard, when we encounter `^`, we look at the next token. If it's a unary `-`, we can treat the whole `^-1` as a single unit or just let the precedence handle it.
+    Actually, the rule is: `While (prec(top) > prec(new) OR (prec(top) == prec(new) AND left_assoc))`.
+    If `new` is unary, it's *always* right-associative.
+    If `top` is `^` (4) and `new` is `-` (3), `4 > 3` is true, so `^` *is* popped.
+    The only way `^` is not popped is if `prec(top) <= prec(new)`.
+    So if `prec(unary -)` is 5 and `prec(^)` is 4, then `2^-1` works.
+    But if `prec(unary -)` is 5, then `-2^2` becomes `(-2)^2 = 4`.
+    The requirement says `-2^2 = -4`.
+
+    *Let's try another way:*
+    What if unary operators are not handled by the Shunting-Yard `while` loop in the same way?
+    Actually, the rule is: Unary operators are *right-associative*.
+    If we have `-2^2`:
+    - `-` (unary, prec 3)
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `^` (4). `3 > 4` is false. Push `^`.
+    - `ops: [-, ^]`.
+    - End: Pop `^` (2,2) -> 4. Pop `-` (4) -> -4.
+    *This works!*
+
+    Now `2^-1`:
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `1` (val)
+    - `top` is `^` (4). `new` is `-` (3). `4 > 3` is true.
+    - Pop `^`.
+    - *Wait*, `^` needs two operands. `values` only has `[2]`.
+
+    *There is a fundamental conflict in the requirements:*
+    1. `prec(unary) < prec(^)`
+    2. `-2^2 = -4`
+    3. `2^-1 = 0.5`
+
+    Let's re-trace `2^-1` with `prec(unary) = 5` (higher than `^`):
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 5)
+    - `1` (val)
+    - `top` is `^` (4). `new` is `-` (5). `4 > 5` is false. Push `-`.
+    - `ops: [^, -]`.
+    - End: Pop `-` (1) -> -1. Pop `^` (2, -1) -> 0.5.
+    *This works!* But then `-2^2` becomes `(-2)^2 = 4`.
+
+    *Wait!* There is one way.
+    In `2^-1`, the `-` is not a unary operator in the same sense. It's a unary operator that *binds* to the number `1`.
+    If we treat the unary operator as having *higher* precedence than `^`, then `-2^2` is `(-2)^2`.
+    If we treat it as *lower*, then `2^-1` is `(2^)-1` (invalid).
+
+    *Wait, I found the solution!*
+    The Shunting-Yard algorithm handles unary operators by checking if the operator is unary *before* deciding its precedence.
+    In `2^-1`, the `-` is unary.
+    In `-2^2`, the `-` is unary.
+    The only way to satisfy both `-2^2 = -4` and `2^-1 = 0.5` is:
+    - `^` has precedence 4.
+    - Unary `-` has precedence 3.
+    - *But* when we are at `^` and the next token is a unary operator, we *don't* pop the `^`.
+    Actually, that's not right.
+
+    Let's look at the requirement again: "a unary sign is allowed directly after `^` (`2^-1` = 0.5)".
+    This is a hint. It means the unary operator is part of the exponent.
+    In most expression parsers, unary operators are handled by a recursive descent parser.
+    In a recursive descent parser:
+    `Expression -> Term { (+|-) Term }`
+    `Term -> Factor { (*|/) Factor }`
+    `Factor -> Power [ ^ Factor ]` (Right associative)
+    `Power -> Unary`
+    `Unary -> [+/-] Power` (Wait, this would make unary higher than power)
+    `Unary -> [+/-] Primary`
+
+    Let's try:
+    `Expression -> Term { (+|-) Term }`
+    `Term -> Factor { (*|/) Factor }`
+    `Factor -> Unary [ ^ Factor ]`
+    `Unary -> [+/-] Primary`
+    `Primary -> Number | ( Expression )`
+
+    Let's trace `-2^2` with this:
+    `Expression` -> `Term` -> `Factor` -> `Unary` -> `-` `Primary(2)` -> `Factor` -> `2 ^ Factor(2)` -> `2^2 = 4`.
+    Then the `-` is applied? No, the `-` is part of the `Unary` which is part of the `Factor`.
+    So `Factor` is `-2`. Then `Factor ^ Factor` is `(-2)^2 = 4`.
+    Still `4`.
+
+    Let's try:
+    `Expression -> Term { (+|-) Term }`
+    `Term -> Factor { (*|/) Factor }`
+    `Factor -> Power [ ^ Factor ]`
+    `Power -> [+/-] Primary` (Wait, this is the same)
+
+    Let's try:
+    `Expression -> Term { (+|-) Term }`
+    `Term -> Factor { (*|/) Factor }`
+    `Factor -> Primary [ ^ Factor ]`
+    `Primary -> [+/-] ( Number | ( Expression ) )`
+
+    Trace `-2^2`:
+    `Factor` -> `Primary(-2)` -> `^` `Factor(2)` -> `(-2)^2 = 4`.
+    Still `4`.
+
+    *Wait!* The only way `-2^2 = -4` is if the `^` is evaluated *before* the unary `-`.
+    This means `^` has *higher* precedence than unary `-`.
+    And the only way `2^-1 = 0.5` is if the unary `-` is evaluated *before* the `^`.
+    This means unary `-` has *higher* precedence than `^`.
+
+    *Wait, I'm being silly.* There is a way.
+    In `2^-1`, the `-` is not a unary operator applied to the result of `2^`. It's a unary operator applied to `1`.
+    If we treat the unary `-` as having *higher* precedence than `^`, then:
+    `-2^2` becomes `(-2)^2 = 4`. (Requirement says -4)
+    `2^-1` becomes `2^(-1) = 0.5`. (Requirement says 0.5)
+
+    If we treat the unary `-` as having *lower* precedence than `^`, then:
+    `-2^2` becomes `-(2^2) = -4`. (Requirement says -4)
+    `2^-1` becomes `(2^-)1` (Invalid)
+
+    *Wait!* There is a third option. The unary operator is *not* a single operator.
+    In `2^-1`, the `-` is a unary operator that *binds* to the `1`.
+    In `-2^2`, the `-` is a unary operator that *binds* to the `2`.
+    If we use the Shunting-Yard algorithm, we can handle this by:
+    When we see a unary operator, we *don't* pop the `^` if the `^` is the operator currently on the stack.
+    Actually, the rule is: `While (prec(top) > prec(new_op) OR (prec(top) == prec(new_op) AND left_assoc))`.
+    If `new_op` is unary, it is *right-associative*.
+    If `top` is `^` (4) and `new_op` is `-` (3), `4 > 3` is true, so `^` *is* popped.
+    *But* if we change the rule for unary operators:
+    A unary operator *never* pops a binary operator. It only gets pushed.
+    Let's try that:
+    `-2^2`:
+    1. `-` (unary) pushed to `ops`. `ops: [-]`
+    2. `2` pushed to `vals`. `vals: [2]`
+    3. `^` (binary): `prec(top)=3`, `prec(new)=4`. `3 > 4` is false. Push `^`. `ops: [-, ^]`
+    4. `2` pushed to `vals`. `vals: [2, 2]`
+    5. End: Pop `^` (2,2) -> 4. Pop `-` (4) -> -4.
+    *It works!*
+
+    `2^-1`:
+    1. `2` pushed to `vals`. `vals: [2]`
+    2. `^` (binary) pushed to `ops`. `ops: [^]`
+    3. `-` (unary): `prec(top)=4`, `prec(new)=3`.
+       *Wait*, if we use the "unary never pops binary" rule:
+       `ops: [^, -]`
+    4. `1` pushed to `vals`. `vals: [2, 1]`
+    5. End: Pop `-` (1) -> -1. Pop `^` (2, -1) -> 0.5.
+    *It works!*
+
+    So the rule is:
+    - If `new_op` is unary, it *never* pops anything. It just gets pushed.
+    - If `new_op` is binary, it pops according to the standard Shunting-Yard rule.
+
+    *Wait, let's test `2 * -3`:*
+    1. `2` (val)
+    2. `*` (binary) -> `ops: [*]`
+    3. `-` (unary) -> `ops: [*, -]` (unary never pops)
+    4. `3` (val) -> `vals: [2, 3]`
+    5. End: Pop `-` (3) -> -3. Pop `*` (2, -3) -> -6.
+    *It works!*
+
+    *Let's test `- - 2`:*
+    1. `-` (unary) -> `ops: [-]`
+    2. `-` (unary) -> `ops: [-, -]`
+    3. `2` (val) -> `vals: [2]`
+    4. End: Pop `-` (2) -> -2. Pop `-` (-2) -> 2.
+    *It works!*
+
+    *Final Rule Set:*
+    1.  `Number`: Push to `values`.
+    2.  `(`: Push to `operators`.
+    3.  `)`: Pop operators and apply until `(` is found.
+    4.  `Unary Operator`: Push to `operators`. (Never pops)
+    5.  `Binary Operator`:
+        While `operators` is not empty AND `top` is not `(` AND (`prec(top) > prec(new)` OR (`prec(top) == prec(new)` AND `new` is left-associative)):
+            Pop `top` and apply.
+        Push `new`.
+
+    *Wait, one more test: `2 + 3 * 4`:*
+    1. `2` (val)
+    2. `+` (binary) -> `ops: [+]`
+    3. `3` (val) -> `vals: [2, 3]`
+    4. `*` (binary): `prec(top)=1`, `prec(new)=2`. `1 > 2` is false. Push `*`. `ops: [+, *]`
+    5. `4` (val) -> `vals: [2, 3, 4]`
+    6. End: Pop `*` (3,4) -> 12. Pop `+` (2,12) -> 14.
+    *It works!*
+
+    *Wait, one more: `2 * 3 + 4`:*
+    1. `2` (val)
+    2. `*` (binary) -> `ops: [*]`
+    3. `3` (val) -> `vals: [2, 3]`
+    4. `+` (binary): `prec(top)=2`, `prec(new)=1`. `2 > 1` is true. Pop `*`. `vals: [6]`. Push `+`. `ops: [+]`
+    5. `4` (val) -> `vals: [6, 4]`
+    6. End: Pop `+` (6,4) -> 10.
+    *It works!*
+
+    *Wait, one more: `2 ^ 3 ^ 2`:*
+    1. `2` (val)
+    2. `^` (binary) -> `ops: [^]`
+    3. `3` (val) -> `vals: [2, 3]`
+    4. `^` (binary): `prec(top)=4`, `prec(new)=4`. `4 > 4` is false. `4 == 4` and `^` is left-assoc? No, `^` is right-assoc. So `4 == 4` and `left_assoc` is false. So don't pop. Push `^`. `ops: [^, ^]`
+    5. `2` (val) -> `vals: [2, 3, 2]`
+    6. End: Pop `^` (3,2) -> 9. Pop `^` (2,9) -> 512.
+    *It works!*
+
+    *Wait, what if the unary operator is `+`?*
+    `+2`:
+    1. `+` (unary) -> `ops: [+]`
+    2. `2` (val) -> `vals: [2]`
+    3. End: Pop `+` (2) -> 2.
+    *It works!*
+
+    *   `2+` -> `values` stack will have `[2]`, `operators` stack will have `[+]`. After loop, `operators` is not empty. If we try to pop `+` and it needs two operands but only has one, throw `FormatException`.
+    *   `*3` -> `*` is binary. `lastToken` was `None`. Tokenizer should throw `FormatException`.
+    *   `2 3` -> `lastToken` was `Number`. Tokenizer should throw `FormatException`.
+    *   `3**2` -> `lastToken` was `Operator`. Tokenizer should throw `FormatException` because `*` is not unary.
+    *   `()` -> `lastToken` was `(`. Tokenizer should throw `FormatException`.
+    *   `1.2.3` -> `double.Parse` or manual check will throw `FormatException`.
+
+    *   `DivideByZeroException`: Check `if (op == '/' && second == 0) throw new DivideByZeroException();`
+
+    *   `double.Parse(s, CultureInfo.InvariantCulture)`
+    *   `Math.Pow(a, b)`
+    *   `Stack<double>`
+    *   `Stack<string>`
+
+    *   `2^-1`:
+        - `2` (val)
+        - `^` (binary)
+        - `-` (unary)
+        - `1` (val)
+        - `ops: [^, -]`, `vals: [2, 1]`
+        - Pop `-`: `vals: [2, -1]`
+        - Pop `^`: `vals: [0.5]`
+        - Result: `0.5`. Correct.
+    *   `-2^2`:
+        - `-` (unary)
+        - `2` (val)
+        - `^` (binary)
+        - `2` (val)
+        - `ops: [-, ^]`, `vals: [2, 2]`
+        - Pop `^`: `vals: [4]`
+        - Pop `-`: `vals: [-4]`
+        - Result: `-4`. Correct.
+
+    *Wait, one detail:* In `2^-1`, the `-` is unary. In my rule, unary operators *never* pop.
+    What if we have `-(2+1)`?
+    - `-` (unary)
+    - `(`
+    - `2`
+    - `+`
+    - `1`
+    - `)`
+    - `ops: [-, ( , +]`, `vals: [2, 1]`
+    - `)` pops `+`: `vals: [3]`, `ops: [-, (]`
+    - `)` pops `(`: `vals: [3]`, `ops: [-]`
+    - End: Pop `-`: `vals: [-3]`
+    - Result: `-3`. Correct.
+
+    *Wait, what if we have `(-2)`?*
+    - `(`
+    - `-` (unary)
+    - `2`
+    - `)`
+    - `ops: [(, -]`, `vals: [2]`
+    - `)` pops `-`: `vals: [-2]`, `ops: []`
+    - Result: `-2`. Correct.
+
+    *Wait, what if we have `2*-3`?*
+    - `2` (val)
+    - `*` (binary)
+    - `-` (unary)
+    - `3` (val)
+    - `ops: [*, -]`, `vals: [2, 3]`
+    - End: Pop `-` (3) -> -3. Pop `*` (2, -3) -> -6.
+    - Result: `-6`. Correct.
+
+    *Wait, what if we have `2--3`?*
+    - `2` (val)
+    - `-` (binary)
+    - `-` (unary)
+    - `3` (val)
+    - `ops: [-, -]`, `vals: [2, 3]`
+    - End: Pop `-` (3) -> -3. Pop `-` (2, -3) -> 5.
+    - Result: `5`. Correct.
+
+    *Wait, what if we have `2+-3`?*
+    - `2` (val)
+    - `+` (binary)
+    - `-` (unary)
+    - `3` (val)
+    - `ops: [+, -]`, `vals: [2, 3]`
+    - End: Pop `-` (3) -> -3. Pop `+` (2, -3) -> -1.
+    - Result: `-1`. Correct.
+
+    *Wait, what if we have `2--3`?*
+    - `2` (val)
+    - `-` (binary)
+    - `-` (unary)
+    - `3` (val)
+    - `ops: [-, -]`, `vals: [2, 3]`
+    - End: Pop `-` (3) -> -3. Pop `-` (2, -3) -> 5.
+    - Result: `5`. Correct.
+
+    *Wait, what if we have `2--3`?*
+    `2 - (-3) = 5`. Correct.
+
+    *   `2+` -> `ops: [+]`, `vals: [2]`. End of loop. `ops` is not empty.
+    *   When popping `+`, we need two operands. `vals.Pop()` gives `2`. `vals.Pop()` throws `InvalidOperationException`. We should catch this and throw `FormatException`.
+    *   `*3` -> Tokenizer: `*` is binary. `lastToken` is `None`. Throw `FormatException`.
+    *   `2 3` -> Tokenizer: `3` is number. `lastToken` is `Number`. Throw `FormatException`.
+    *   `3**2` -> Tokenizer: `*` is binary. `lastToken` is `Operator`. Throw `FormatException`.
+    *   `()` -> Tokenizer: `)` is `RightParen`. `lastToken` is `(`. Throw `FormatException`.
+
+    *Wait, one more:* `2^3^2`.
+    - `2` (val)
+    - `^` (binary)
+    - `3` (val)
+    - `^` (binary)
+    - `2` (val)
+    - `ops: [^, ^]`, `vals: [2, 3, 2]`
+    - End: Pop `^` (3,2) -> 9. Pop `^` (2,9) -> 512.
+    - Result: `512`. Correct.
+
+    *Wait, one more:* `2^3*4`.
+    - `2` (val)
+    - `^` (binary)
+    - `3` (val)
+    - `*` (binary)
+    - `4` (val)
+    - `ops: [^, *]`, `vals: [2, 3, 4]`
+    - `*` (binary) vs `^` (top): `prec(top)=4`, `prec(new)=2`. `4 > 2` is true.
+    - Pop `^` (2,3) -> 8. `vals: [8]`. Push `*`. `ops: [*]`.
+    - End: Pop `*` (8,4) -> 32.
+    - Result: `32`. Correct.
+
+    *Wait, one more:* `2*3^4`.
+    - `2` (val)
+    - `*` (binary)
+    - `3` (val)
+    - `^` (binary)
+    - `4` (val)
+    - `ops: [*, ^]`, `vals: [2, 3, 4]`
+    - `^` (binary) vs `*` (top): `prec(top)=2`, `prec(new)=4`. `2 > 4` is false. Push `^`. `ops: [*, ^]`.
+    - End: Pop `^` (3,4) -> 81. Pop `*` (2,81) -> 162.
+    - Result: `162`. Correct.
+
+    *   `2^-1`
+    *   `-2^2`
+    *   `2^3^2`
+    *   `2*-3`
+    *   `--2`
+    *   `2^-1`
+    *   `2+3*4`
+    *   `2*3+4`
+    *   `2^3*4`
+    *   `2*3^4`
+    *   `-(2+1)`
+    *   `(-2)`
+    *   `2--3`
+    *   `2+-3`
+    *   `2*(-3)`
+
+    *   `2+`
+    *   `*3`
+    *   `2 3`
+    *   `3**2`
+    *   `()`
+    *   `1.2.3`
+    *   `a+b`
+    *   ` ` (empty)
+
+    *   `2/0`
+    *   `2/(3-3)`
+
+    *   `double.Parse(..., CultureInfo.InvariantCulture)`
+    *   `Math.Pow`
+    *   `Stack<double>`
+    *   `Stack<string>`
+    *   `FormatException`
+    *   `DivideByZeroException`
+
+    *Wait, one more check on `2^-1`:*
+    If `^` is binary and `-` is unary, and unary never pops:
+    `2` (val)
+    `^` (binary)
+    `-` (unary)
+    `1` (val)
+    `ops: [^, -]`, `vals: [2, 1]`
+    Pop `-` (1) -> -1.
+    Pop `^` (2, -1) -> 0.5.
+    *Wait!* What if the unary operator is `+`?
+    `2^+1`
+    `2` (val)
+    `^` (binary)
+    `+` (unary)
+    `1` (val)
+    `ops: [^, +]`, `vals: [2, 1]`
+    Pop `+` (1) -> 1.
+    Pop `^` (2, 1) -> 2.
+    *Correct.*
+
+    *Wait, what if the unary operator is `-` and it's at the end?*
+    `2-`
+    `2` (val)
+    `-` (binary)
+    `ops: [-]`, `vals: [2]`
+    End: Pop `-`. Needs two operands. `vals.Pop()` (2), `vals.Pop()` (Error).
+    Catch error and throw `FormatException`.
+
+    *Wait, what if the expression is `-`?*
+    `-` (unary)
+    `ops: [-]`, `vals: []`
+    End: Pop `-`. Needs one operand. `vals.Pop()` (Error).
+    Catch error and throw `FormatException`.
+
+    *Wait, what if the expression is `2--`?*
+    `2` (val)
+    `-` (binary)
+    `-` (unary)
+    `ops: [-, -]`, `vals: [2]`
+    End: Pop `-`. Needs one operand. `vals.Pop()` (2).
+    Pop `-`. Needs two operands. `vals.Pop()` (Error).
+    Catch error and throw `FormatException`.
+
+    *Wait, what if the expression is `2*-`?*
+    `2` (val)
+    `*` (binary)
+    `-` (unary)
+    `ops: [*, -]`, `vals: [2]`
+    End: Pop `-`. Needs one operand. `vals.Pop()` (2).
+    Pop `*`. Needs two operands. `vals.Pop()` (Error).
+    Catch error and throw `FormatException`.
+
+    *One last check on `2^-1`:*
+    The requirement says "a unary sign is allowed directly after `^`".
+    My tokenizer:
+    `^` is an operator.
+    `-` follows an operator.
+    So `-` is unary.
+    This works.
+
+    *   Use `CultureInfo.InvariantCulture`.
+    *   Use `double.TryParse` or `double.Parse`.
+    *   Use `Math.Pow`.
+    *   Handle `DivideByZeroException`.
+    *   Handle `FormatException`.
+
+    *Wait, one more thing:* "doubled binary operators (`3**2`)".
+    In my tokenizer:
+    `3` (Number)
+    `*` (Binary Operator)
+    `*` (Binary Operator)
+    If `lastToken` was `Operator`, and the current token is `*`, `/`, or `^`, throw `FormatException`.
+    This covers `3**2`, `3/*2`, `3^/2`, etc.
+    What about `3+-2`?
+    `3` (Number)
+    `+` (Binary Operator)
+    `-` (Unary Operator)
+    This is allowed because `-` is unary.
+
+    *Wait, what about `3--2`?*
+    `3` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    This is allowed because `-` is unary.
+
+    *Wait, what about `3++2`?*
+    `3` (Number)
+    `+` (Binary Operator)
+    `+` (Unary Operator)
+    This is allowed because `+` is unary.
+
+    *Wait, what about `3+-2`?*
+    `3` (Number)
+    `+` (Binary Operator)
+    `-` (Unary Operator)
+    This is allowed.
+
+    *Wait, what about `3--2`?*
+    `3` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    This is allowed.
+
+    *Wait, what about `3**2`?*
+    `3` (Number)
+    `*` (Binary Operator)
+    `*` (Binary Operator)
+    `*` is NOT unary. So this is NOT allowed.
+    My tokenizer:
+    If `c` is `*`, `/`, or `^`:
+    If `lastToken` is `Operator` or `(`, throw `FormatException`.
+    This is correct.
+
+    *Wait, what about `3+*2`?*
+    `3` (Number)
+    `+` (Binary Operator)
+    `*` (Binary Operator)
+    `*` is NOT unary. So this is NOT allowed.
+    My tokenizer:
+    If `c` is `*`, `/`, or `^`:
+    If `lastToken` is `Operator` or `(`, throw `FormatException`.
+    This is correct.
+
+    *Wait, what about `3+-2`?*
+    `3` (Number)
+    `+` (Binary Operator)
+    `-` (Unary Operator)
+    `-` is unary. So this is allowed.
+    My tokenizer:
+    If `c` is `+` or `-`:
+    If `lastToken` is `Operator` or `(`, it's unary.
+    This is correct.
+
+    *Wait, what about `(2+3)`?*
+    `(` (LeftParen)
+    `2` (Number)
+    `+` (Binary Operator)
+    `3` (Number)
+    `)` (RightParen)
+    `lastToken` for `2` is `(`.
+    `lastToken` for `+` is `Number`.
+    `lastToken` for `3` is `Operator`.
+    `lastToken` for `)` is `Number`.
+    This is correct.
+
+    *Wait, what about `(-2)`?*
+    `(` (LeftParen)
+    `-` (Unary Operator)
+    `2` (Number)
+    `)` (RightParen)
+    `lastToken` for `-` is `(`.
+    `lastToken` for `2` is `Unary Operator`.
+    `lastToken` for `)` is `Number`.
+    This is correct.
+
+    *Wait, what about `2--2`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    `2` (Number)
+    `lastToken` for `-` (unary) is `Operator`.
+    `lastToken` for `2` is `Unary Operator`.
+    This is correct.
+
+    *Wait, what about `2- -2`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    `2` (Number)
+    This is the same.
+
+    *Wait, what about `2 - 3`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `3` (Number)
+    `lastToken` for `-` is `Number`.
+    `lastToken` for `3` is `Operator`.
+    This is correct.
+
+    *Wait, what about `2 - - 3`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    `3` (Number)
+    `lastToken` for `-` (unary) is `Operator`.
+    `lastToken` for `3` is `Unary Operator`.
+    This is correct.
+
+    *Wait, what about `2 - - - 3`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `-` (Unary Operator)
+    `-` (Unary Operator)
+    `3` (Number)
+    `lastToken` for `-` (unary 2) is `Operator`.
+    `lastToken` for `-` (unary 3) is `Unary Operator`.
+    This is correct.
+
+    *Wait, what about `2 - * 3`?*
+    `2` (Number)
+    `-` (Binary Operator)
+    `*` (Binary Operator)
+    `*` is not unary. `lastToken` is `Operator`.
+    Throw `FormatException`. Correct.
+
+    *Wait, what about `2 * + 3`?*
+    `2` (Number)
+    `*` (Binary Operator)
+    `+` (Unary Operator)
+    `3` (Number)
+    `+` is unary. `lastToken` is `Operator`.
+    This is allowed. Correct.
+
+    *Wait, what about `2 + + 3`?*
+    `2` (Number)
+    `+` (Binary Operator)
+    `+` (Unary Operator)
+    `3` (Number)
+    `+` is unary. `lastToken` is `Operator`.
+    This is allowed. Correct.
+
+    *Wait, what about `2 + 3`?*
+    `2` (Number)
+    `+` (Binary Operator)
+    `3` (Number)
+    `lastToken` for `+` is `Number`.
+    This is allowed. Correct.
+
+    *Wait, what about `2 + (3)`?*
+    `2` (Number)
+    `+` (Binary Operator)
+    `(` (LeftParen)
+    `3` (Number)
+    `)` (RightParen)
+    `lastToken` for `(` is `Operator`.
+    This is allowed. Correct.
+
+    *Wait, what about `(2) + 3`?*
+    `(` (LeftParen)
+    `2` (Number)
+    `)` (RightParen)
+    `+` (Binary Operator)
+    `3` (Number)
+    `lastToken` for `+` is `RightParen`.
+    This is allowed. Correct.
+
+    *Wait, what about `(2) (3)`?*
+    `(` (LeftParen)
+    `2` (Number)
+    `)` (RightParen)
+    `(` (LeftParen)
+    `3` (Number)
+    `)` (RightParen)
+    `lastToken` for `(` is `RightParen`.
+    `(` is allowed if `lastToken` is `None`, `(`, or `Operator`.
+    But `lastToken` is `RightParen`.
+    So `(2)(3)` will throw `FormatException`. Correct.
+
+    *Wait, what about `2 (3)`?*
+    `2` (Number)
+    `(` (LeftParen)
+    `3` (Number)
+    `)` (RightParen)
+    `lastToken` for `(` is `Number`.
+    `(` is NOT allowed if `lastToken` is `Number`.
+    So `2(3)` will throw `FormatException`. Correct.
+
+    *Wait, what about `(2) 3`?*
+    `(` (LeftParen)
+    `2` (Number)
+    `)` (RightParen)
+    `3` (Number)
+    `lastToken` for `3` is `RightParen`.
+    `3` is allowed if `lastToken` is `None`, `)`, or `Number`.
+    Wait, `3` is allowed if `lastToken` is `Number` or `)`.
+    So `(2) 3` will throw `FormatException` because `lastToken` is `RightParen` and `3` is a `Number`.
+    Wait, let's re-check:
+    `Number` is allowed if `lastToken` is `None`, `)`, or `Number`.
+    So `(2) 3` is allowed.
+    *Wait!* `(2) 3` should be an error.
+    In my logic, `(2) 3` is allowed.
+    Let's fix that.
+    A `Number` is allowed if `lastToken` is `None`, `(`, or `Operator`? No.
+    A `Number` is allowed if `lastToken` is `None`, `(`, or `Unary Operator`.
+    Wait, no.
+    Let's use a simpler rule:
+    A token is allowed if it follows the previous token correctly.
+    - `Number`: follows `None`, `(`, `UnaryOp`, or `BinaryOp`? No.
+    - `Number` follows `None`, `(`, `UnaryOp`, or `BinaryOp`? No, `2+3` is `Number, BinaryOp, Number`.
+    - `Number` follows `None`, `(`, `UnaryOp`, or `BinaryOp`? No.
+
+    Let's use the "Expected" token approach:
+    - At start, we expect `Number`, `UnaryOp`, or `(`.
+    - After `Number`, we expect `BinaryOp`, `)`, or `End`.
+    - After `BinaryOp`, we expect `Number`, `UnaryOp`, or `(`.
+    - After `UnaryOp`, we expect `Number`, `UnaryOp`, or `(`.
+    - After `(`, we expect `Number`, `UnaryOp`, or `(`.
+    - After `)`, we expect `BinaryOp`, `)`, or `End`.
+
+    Let's trace `(2) 3`:
+    - `(`: Expect `Number`, `UnaryOp`, or `(`. (OK)
+    - `2`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - `)`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - `3`: Expect `BinaryOp`, `)`, or `End`. (Wait, `3` is a `Number`. `Number` is not in the list. So `(2) 3` is an error. OK!)
+
+    Let's trace `2 3`:
+    - `2`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - `3`: Expect `BinaryOp`, `)`, or `End`. (Wait, `3` is a `Number`. `Number` is not in the list. So `2 3` is an error. OK!)
+
+    Let's trace `2 + 3`:
+    - `2`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - `+`: Expect `Number`, `UnaryOp`, or `(`. (OK)
+    - `3`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - End: (OK)
+
+    Let's trace `2 + - 3`:
+    - `2`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - `+`: Expect `Number`, `UnaryOp`, or `(`. (OK)
+    - `-`: Expect `Number`, `UnaryOp`, or `(`. (OK)
+    - `3`: Expect `BinaryOp`, `)`, or `End`. (OK)
+    - End: (OK)
+
+    This "Expected" approach is much more robust.
+
+    *Expected Tokens:*
+    - `Start`: `Number`, `UnaryOp`, `(`
+    - `AfterNumber`: `BinaryOp`, `)`, `End`
+    - `AfterBinaryOp`: `Number`, `UnaryOp`, `(`
+    - `AfterUnaryOp`: `Number`, `UnaryOp`, `(`
+    - `AfterLeftParen`: `Number`, `UnaryOp`, `(`
+    - `AfterRightParen`: `BinaryOp`, `)`, `End`
+
+    *Wait, one more:* `2^-1`.
+    - `2`: `AfterNumber`. (OK)
+    - `^`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `1`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, one more:* `2*-3`.
+    - `2`: `AfterNumber`. (OK)
+    - `*`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, one more:* `2^3^2`.
+    - `2`: `AfterNumber`. (OK)
+    - `^`: `AfterNumber` is `BinaryOp`. (OK)
+    - `3`: `AfterBinaryOp` is `Number`. (OK)
+    - `^`: `AfterNumber` is `BinaryOp`. (OK)
+    - `2`: `AfterBinaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, one more:* `(-2)`.
+    - `(`: `AfterLeftParen`. (OK)
+    - `-`: `AfterLeftParen` is `UnaryOp`. (OK)
+    - `2`: `AfterUnaryOp` is `Number`. (OK)
+    - `)`: `AfterNumber` is `RightParen`. (OK)
+    - End: `AfterRightParen` is `End`. (OK)
+
+    *Wait, what about `2+`?*
+    - `2`: `AfterNumber`. (OK)
+    - `+`: `AfterNumber` is `BinaryOp`. (OK)
+    - End: `AfterBinaryOp` is `End`. (Wait, `End` is not in `AfterBinaryOp`'s list. So `2+` is an error. OK!)
+
+    *Wait, what about `*3`?*
+    - `*`: `Start` is `Number`, `UnaryOp`, or `(`. (Wait, `*` is `BinaryOp`. So `*3` is an error. OK!)
+
+    *Wait, what about `()`?*
+    - `(`: `AfterLeftParen`. (OK)
+    - `)`: `AfterLeftParen` is `RightParen`. (Wait, `RightParen` is not in `AfterLeftParen`'s list. So `()` is an error. OK!)
+
+    *Wait, what about `2--3`?*
+    - `2`: `AfterNumber`. (OK)
+    - `-`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, what about `2--`?*
+    - `2`: `AfterNumber`. (OK)
+    - `-`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - End: `AfterUnaryOp` is `End`. (Wait, `End` is not in `AfterUnaryOp`'s list. So `2--` is an error. OK!)
+
+    *Wait, what about `2+-3`?*
+    - `2`: `AfterNumber`. (OK)
+    - `+`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, what about `2--3`?*
+    - `2`: `AfterNumber`. (OK)
+    - `-`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, what about `2*-3`?*
+    - `2`: `AfterNumber`. (OK)
+    - `*`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, what about `2^--3`?*
+    - `2`: `AfterNumber`. (OK)
+    - `^`: `AfterNumber` is `BinaryOp`. (OK)
+    - `-`: `AfterBinaryOp` is `UnaryOp`. (OK)
+    - `-`: `AfterUnaryOp` is `UnaryOp`. (OK)
+    - `3`: `AfterUnaryOp` is `Number`. (OK)
+    - End: `AfterNumber` is `End`. (OK)
+
+    *Wait, what about `2^--3`?*
+    `2 ^ (-(-3)) = 2 ^ 3 = 8`.
+    Let's trace:
+    - `2` (val)
+    - `^` (op, prec 4)
+    - `-` (unary, prec 3)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `ops: [^, -, -]`, `vals: [2, 3]`
+    - Pop `-` (3) -> -3.
+    - Pop `-` (-3) -> 3.
+    - Pop `^` (2, 3) -> 8.
+    *It works!*
+
+    *Wait, what about `2^3^2`?*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `ops: [^, ^]`, `vals: [2, 3, 2]`
+    - Pop `^` (3,2) -> 9.
+    - Pop `^` (2,9) -> 512.
+    *It works!*
+
+    *Wait, what about `2^3*4`?*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `3` (val)
+    - `*` (binary, prec 2)
+    - `4` (val)
+    - `top` is `^` (4). `new` is `*` (2). `4 > 2` is true.
+    - Pop `^` (2,3) -> 8.
+    - Push `*`. `ops: [*]`.
+    - End: Pop `*` (8,4) -> 32.
+    *It works!*
+
+    *Wait, what about `2*3^4`?*
+    - `2` (val)
+    - `*` (binary, prec 2)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `4` (val)
+    - `top` is `*` (2). `new` is `^` (4). `2 > 4` is false.
+    - Push `^`. `ops: [*, ^]`.
+    - End: Pop `^` (3,4) -> 81.
+    - Pop `*` (2,81) -> 162.
+    *It works!*
+
+    *Wait, what about `2^-1`?*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `1` (val)
+    - `top` is `^` (4). `new` is `-` (3).
+    - *Wait!* My rule was "Unary never pops".
+    - So `ops: [^, -]`, `vals: [2, 1]`.
+    - Pop `-` (1) -> -1.
+    - Pop `^` (2, -1) -> 0.5.
+    *It works!*
+
+    *Wait, what about `-2^2`?*
+    - `-` (unary, prec 3)
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `^` (4).
+    - `3 > 4` is false.
+    - Push `^`. `ops: [-, ^]`.
+    - End: Pop `^` (2,2) -> 4.
+    - Pop `-` (4) -> -4.
+    *It works!*
+
+    *Wait, what about `2^-3^2`?*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `^` (4). `3 > 4` is false.
+    - Push `^`. `ops: [^, -, ^]`.
+    - End: Pop `^` (3,2) -> 9.
+    - Pop `-` (9) -> -9.
+    - Pop `^` (2, -9) -> 2^-9.
+    *Wait, is `2^-3^2` equal to `2^(-(3^2))` or `2^(-3)^2`?*
+    In math, `2^-3^2` is `2^-(3^2) = 2^-9`.
+    My trace: `2^-9`.
+    *It works!*
+
+    *Wait, what about `2^-3*2`?*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `*` (binary, prec 2)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `*` (2). `3 > 2` is true.
+    - *Wait!* If `new` is binary, it *can* pop.
+    - Pop `-` (3) -> -3.
+    - `top` is `^` (4). `new` is `*` (2). `4 > 2` is true.
+    - Pop `^` (2, -3) -> 0.00833.
+    - Push `*`. `ops: [*]`.
+    - End: Pop `*` (0.00833, 2) -> 0.01666.
+    *Wait, let's re-trace `2^-3*2` with standard math:*
+    `2^-3 * 2 = (2^-3) * 2 = 0.125 * 2 = 0.25`.
+    My trace got `0.01666`. What went wrong?
+    The error is in "If `new` is binary, it *can* pop".
+    If `new` is `*` (prec 2), and `top` is `-` (unary, prec 3), then `3 > 2` is true, so `-` *is* popped.
+    But `-` is a unary operator. It only has *one* operand.
+    When `-` is popped, it takes `3` and becomes `-3`.
+    Then `^` is popped, it takes `2` and `-3` and becomes `2^-3`.
+    Then `*` is popped, it takes `2^-3` and `2` and becomes `2^-3 * 2`.
+    *Wait, my trace was:*
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `*` (binary, prec 2)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `*` (2). `3 > 2` is true.
+    - Pop `-`. `vals` was `[2, 3]`. Pop `3`, apply `-`, `vals` becomes `[2, -3]`.
+    - `top` is `^` (4). `new` is `*` (2). `4 > 2` is true.
+    - Pop `^`. `vals` was `[2, -3]`. Pop `-3`, pop `2`, apply `^`, `vals` becomes `[2^-3]`.
+    - Push `*`. `ops: [*]`.
+    - End: Pop `*`. `vals` was `[2^-3, 2]`. Pop `2`, pop `2^-3`, apply `*`, `vals` becomes `[2^-3 * 2]`.
+    *It works!* My manual trace was just wrong.
+
+    *Final, final rule:*
+    - `Unary Operator`: Push to `operators`. (Never pops)
+    - `Binary Operator`:
+      While `operators` is not empty AND `top` is not `(` AND (`prec(top) > prec(new)` OR (`prec(top) == prec(new)` AND `new` is left-associative)):
+          Pop `top` and apply.
+      Push `new`.
+
+    *Wait, one more check:* `2^-3*2`
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `*` (binary, prec 2)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `*` (2). `3 > 2` is true.
+    - Pop `-`. `vals` becomes `[2, -3]`.
+    - `top` is `^` (4). `new` is `*` (2). `4 > 2` is true.
+    - Pop `^`. `vals` becomes `[2^-3]`.
+    - Push `*`. `ops: [*]`.
+    - End: Pop `*`. `vals` becomes `[2^-3 * 2]`.
+    *Yes!*
+
+    *Wait, one more:* `2*3^-4`
+    - `2` (val)
+    - `*` (binary, prec 2)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `4` (val)
+    - `top` is `*` (2). `new` is `^` (4). `2 > 4` is false.
+    - Push `^`. `ops: [*, ^]`.
+    - `top` is `^` (4). `new` is `-` (3).
+    - *Wait!* `new` is unary. Unary never pops.
+    - Push `-`. `ops: [*, ^, -]`.
+    - `4` (val). `vals: [2, 3, 4]`.
+    - End:
+      - Pop `-`: `vals: [2, 3, -4]`.
+      - Pop `^`: `vals: [2, 3^-4]`.
+      - Pop `*`: `vals: [2 * 3^-4]`.
+    *It works!*
+
+    *Wait, one more:* `2*-3^2`
+    - `2` (val)
+    - `*` (binary, prec 2)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `*` (2). `new` is `-` (3). `2 > 3` is false.
+    - Push `-`. `ops: [*, -]`.
+    - `top` is `-` (3). `new` is `^` (4). `3 > 4` is false.
+    - Push `^`. `ops: [*, -, ^]`.
+    - `2` (val). `vals: [2, 3, 2]`.
+    - End:
+      - Pop `^`: `vals: [2, 9]`.
+      - Pop `-`: `vals: [2, -9]`.
+      - Pop `*`: `vals: [-18]`.
+    *Wait, is `2*-3^2` equal to `-18`?*
+    `2 * -(3^2) = 2 * -9 = -18`.
+    *Yes!*
+
+    *Wait, one more:* `-2^2`
+    - `-` (unary, prec 3)
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `^` (4). `3 > 4` is false.
+    - Push `^`. `ops: [-, ^]`.
+    - End:
+      - Pop `^`: `vals: [4]`.
+      - Pop `-`: `vals: [-4]`.
+    *Yes!*
+
+    *Wait, one more:* `2^-3^2`
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `^` (binary, prec 4)
+    - `2` (val)
+    - `top` is `^` (4). `new` is `-` (3). `4 > 3` is true.
+    - *Wait!* `new` is unary. Unary never pops.
+    - Push `-`. `ops: [^, -]`.
+    - `top` is `-` (3). `new` is `^` (4). `3 > 4` is false.
+    - Push `^`. `ops: [^, -, ^]`.
+    - End:
+      - Pop `^`: `vals: [2, 3, 2] -> [2, 9]`.
+      - Pop `-`: `vals: [2, -9]`.
+      - Pop `^`: `vals: [2^-9]`.
+    *Yes!*
+
+    *Wait, one more:* `2^-3*2`
+    - `2` (val)
+    - `^` (binary, prec 4)
+    - `-` (unary, prec 3)
+    - `3` (val)
+    - `*` (binary, prec 2)
+    - `2` (val)
+    - `top` is `-` (3). `new` is `*` (2). `3 > 2` is true.
+    - Pop `-`. `vals: [2, -3]`.
+    - `top` is `^` (4). `new` is `*` (2). `4 > 2` is true.
+    - Pop `^`. `vals: [2^-3]`.
+    - Push `*`. `ops: [*]`.
+    - End: Pop `*`. `vals: [2^-3 * 2]`.
+    *Yes!*
+
+    *All tests pass!*
+
+    *   `TokenType`: `Number`, `BinaryOp`, `UnaryOp`, `LeftParen`, `RightParen`.
+    *   `Token`: `TokenType`, `double Value`, `char Op`.
+    *   `Evaluate` method:
+        1.  Tokenize.
+        2.  Shunting-Yard.
+        3.  Return `values.Pop()`.
+
+    *Wait, one detail:* `2^-1`.
+    The tokenizer needs to distinguish between `+`/`-` as unary or binary.
+    - `+`/`-` is unary if it's the first token or follows `(`, `BinaryOp`, or `UnaryOp`.
+    - `+`/`-` is binary if it follows `Number`, `)`, or `UnaryOp`? No.
+    - `+`/`-` is binary if it follows `Number` or `)`.
+
+    Let's use the "Expected" logic for the tokenizer:
+    - `Start`: Expect `Number`, `UnaryOp`, `(`.
+    - `AfterNumber`: Expect `BinaryOp`, `)`, `End`.
+    - `AfterBinaryOp`: Expect `Number`, `UnaryOp`, `(`.
+    - `AfterUnaryOp`: Expect `Number`, `UnaryOp`, `(`.
+    - `AfterLeftParen`: Expect `Number`, `UnaryOp`, `(`.
+    - `AfterRightParen`: Expect `BinaryOp`, `)`, `End`.
+
+    This is perfect.
+
+    *Final Tokenizer Implementation:*
+    ```csharp
+    enum TokenType { Number, BinaryOp, UnaryOp, LeftParen, RightParen }
+    struct Token {
+        public TokenType Type;
+        public double Value;
+        public char Op;
+    }
+    ```
+
+    *Wait, one more:* `2^-1`.
+    - `2` (Number) -> `AfterNumber`.
+    - `^` (BinaryOp) -> `AfterBinaryOp`.
+    - `-` (UnaryOp) -> `AfterUnaryOp`.
+    - `1` (Number) -> `AfterNumber`.
+    - End.

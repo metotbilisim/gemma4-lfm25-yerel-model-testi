@@ -1,0 +1,2232 @@
+*   Class name: `LruCache`.
+    *   Implements: `\Countable`.
+    *   PHP version: 8.4.
+    *   Features: LRU (Least Recently Used) eviction, optional per-entry TTL (Time-To-Live).
+    *   API requirements:
+        *   `__construct(int $capacity, ?\Closure $clock = null)`: Capacity $\ge 1$. Use `$clock` or `microtime(true)`.
+        *   `set(string $key, mixed $value, ?float $ttl = null): void`: Insert/replace, update recency, update TTL. If over capacity: 1. Remove expired, 2. Evict LRU.
+        *   `get(string $key, mixed $default = null): mixed`: Return value, update recency. Handle expired entries (remove them). Handle `null` as a valid value.
+        *   `has(string $key): bool`: Check existence/expiration without changing recency.
+        *   `delete(string $key): bool`: Remove entry, return true if it existed and wasn't expired.
+        *   `count(): int`: Count non-expired entries.
+        *   `keys(): array`: List of non-expired keys, LRU to MRU order.
+    *   Complexity: `get`, `set`, `has`, `delete` $\approx O(1)$ (except for expiration cleanup). `count`, `keys` $\approx O(n)$.
+    *   Expiration rule: Expired if `currentTime >= setTime + ttl`.
+
+    *   To achieve $O(1)$ for `get`, `set`, `has`, `delete`, we need:
+        1.  A Hash Map (associative array in PHP) for $O(1)$ access to entries by key.
+        2.  A Doubly Linked List to maintain the order of usage (LRU/MRU).
+    *   Entry structure:
+        *   `key` (string)
+        *   `value` (mixed)
+        *   `expiresAt` (float|null)
+        *   `prev` (Node reference)
+        *   `next` (Node reference)
+
+    *   *Wait*, PHP's associative arrays maintain insertion order. If we move an element to the end of the array on every access, we can simulate a linked list. However, standard PHP arrays don't allow $O(1)$ "move to end" without re-inserting, which is $O(1)$ but might be slightly less efficient than a manual doubly linked list for very large caches. But for PHP, `unset($arr[$key])` followed by `$arr[$key] = $val` is the standard way to move to the end of the internal linked list used by PHP arrays.
+    *   *Actually*, let's use a manual Doubly Linked List for the nodes to ensure strict $O(1)$ behavior and avoid any potential overhead of array re-indexing, although PHP's array is quite optimized.
+    *   Wait, the requirement says `get`, `set`, `has`, `delete` should be $O(1)$ *on average*.
+    *   Let's define a private `Node` class.
+
+    *   `$capacity`: int.
+    *   `$clock`: Closure.
+    *   `$map`: `array<string, Node>` (for $O(1)$ lookup).
+    *   `$head`: Node (Least Recently Used).
+    *   `$tail`: Node (Most Recently Used).
+    *   `$size`: Current number of valid entries (though `count()` needs to check expiration, so `$size` might be tricky. Let's track the number of nodes in the list).
+
+    *   `__construct`: Validate capacity. Set clock.
+    *   `set`:
+        1.  Check if key exists.
+        2.  If exists: update value, TTL, and move to tail (MRU).
+        3.  If not exists: create new node, add to tail.
+        4.  Check capacity:
+            *   If `count($map) > capacity`:
+                *   Iterate through entries? No, that's $O(n)$.
+                *   The prompt says: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+                *   *Wait*, "remove expired entries" could be $O(n)$ if we have to scan everything. But the prompt says `set` should be $O(1)$ *apart from removing expired entries*. This implies we can scan.
+                *   However, scanning the whole map for expired entries is $O(n)$. Is there a better way? Usually, in LRU caches with TTL, you either use a priority queue for expiration or just clean up when you hit capacity.
+                *   Let's re-read: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+                *   This implies a specific order:
+                    1.  Check if `count > capacity`.
+                    2.  If yes, scan for expired entries and remove them.
+                    3.  If still `count > capacity`, remove the LRU (head).
+                *   Wait, scanning for expired entries is $O(n)$. If I do that every `set`, `set` becomes $O(n)$. But the prompt says `set` is $O(1)$ *apart from removing expired entries*. This is a hint that $O(n)$ is acceptable for the expiration part.
+
+    *   `get`:
+        1.  Check if key exists in map.
+        2.  If exists:
+            *   Check if expired.
+            *   If expired: remove entry, return `$default`.
+            *   If not expired: move to tail (MRU), return value.
+        3.  If not exists: return `$default`.
+
+    *   `has`:
+        1.  Check if key exists in map.
+        2.  If exists:
+            *   Check if expired.
+            *   If expired: return `false`.
+            *   Else: return `true`.
+        3.  Else: return `false`.
+
+    *   `delete`:
+        1.  Check if key exists.
+        2.  If exists:
+            *   Check if expired.
+            *   If expired: return `false` (prompt says "returns true if a non-expired entry existed").
+            *   If not expired: remove node, return `true`.
+        3.  Else: return `false`.
+
+    *   `count`:
+        1.  Iterate through all nodes, count those not expired.
+
+    *   `keys`:
+        1.  Iterate through nodes from head to tail (LRU to MRU).
+        2.  If not expired, add key to array.
+
+    *   `Node` class:
+        ```php
+        private class Node {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiresAt,
+                public ?Node $prev = null,
+                public ?Node $next = null,
+            ) {}
+        }
+        ```
+    *   `LruCache` methods:
+        *   `_removeNode(Node $node)`: Unlinks node from list.
+        *   `_addNodeToTail(Node $node)`: Adds node to the end of the list.
+        *   `_moveToTail(Node $node)`: `_removeNode` then `_addNodeToTail`.
+        *   `_removeNodeFromMap(string $key)`: `unset($this->map[$key])`.
+
+    *   `set` logic refined:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be positive");
+            }
+            $now = ($this->clock)();
+            $expiresAt = ($ttl !== null) ? ($now + $ttl) : null;
+
+            if (isset($this->map[$key])) {
+                $node = $this->map[$key];
+                $node->value = $value;
+                $node->expiresAt = $expiresAt;
+                $this->moveToTail($node);
+            } else {
+                $node = new Node($key, $value, $expiresAt);
+                $this->map[$key] = $node;
+                $this->addNodeToTail($node);
+            }
+
+            if (count($this->map) > $this->capacity) {
+                // 1. Remove expired
+                foreach ($this->map as $k => $n) {
+                    if ($n->expiresAt !== null && $n->expiresAt <= $now) {
+                        $this->removeNode($n);
+                        unset($this->map[$k]);
+                    }
+                }
+                // 2. If still over capacity, evict LRU
+                if (count($this->map) > $this->capacity) {
+                    $lru = $this->head;
+                    if ($lru !== null) {
+                        $this->removeNode($lru);
+                        unset($this->map[$lru->key]);
+                    }
+                }
+            }
+        }
+        ```
+
+    *   *Wait*, the `set` logic for "remove expired entries" might be problematic if I iterate while unsetting. In PHP, `foreach` on an array works fine with `unset` inside the loop, but it's safer to collect keys to delete or just be careful. Actually, PHP's `foreach` is safe for `unset` on the current element.
+
+    *   *Wait*, the prompt says: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   This implies that if I have 10 capacity, and I add an 11th item, I first check if any of the 11 are expired. If I find 2 expired ones, I remove them, now I have 9. 9 is not > 10, so I'm done. If I find 0 expired ones, I still have 11, so I remove the LRU, now I have 10.
+
+    *   *Wait*, there's a subtle bug in my `set` logic. If I'm adding a new key and it's the 11th key, I should check expiration *before* or *after* adding? The prompt says "If the cache *now* holds more than `$capacity` entries...". So I add it first, then check.
+
+    *   *Wait*, the `count()` method: "number of non-expired entries".
+    *   The `keys()` method: "list of non-expired keys, ordered from least recently used to most recently used".
+
+    *   `get(string $key, mixed $default = null): mixed`
+        *   If key exists:
+            *   Check expiration.
+            *   If expired: `delete(key)`, return `$default`.
+            *   If not expired: `moveToTail(node)`, return `node->value`.
+        *   Else: return `$default`.
+
+    *   `has(string $key): bool`
+        *   If key exists:
+            *   Check expiration.
+            *   If expired: return `false`.
+            *   Else: return `true`.
+        *   Else: return `false`.
+
+    *   `delete(string $key): bool`
+        *   If key exists:
+            *   Check expiration.
+            *   If expired: return `false`.
+            *   Else: `removeNode(node)`, `unset(map[key])`, return `true`.
+        *   Else: return `false`.
+
+    *   `count(): int`
+        *   Loop through map, count non-expired.
+
+    *   `keys(): array`
+        *   Loop through the linked list from `head` to `tail`.
+        *   If not expired, add to array.
+
+    *   `capacity` must be $\ge 1$.
+    *   `ttl` $\le 0$ throws `\InvalidArgumentException`.
+    *   `null` is a valid value.
+    *   `get` returns `$default` if missing or expired.
+    *   `get` returns `null` if `null` is the stored value.
+    *   `has` does NOT change recency.
+    *   `delete` returns `true` if a non-expired entry existed.
+    *   `keys` order: LRU to MRU.
+
+    *   `$capacity = 2`.
+    *   `set('a', 1, 10)` (expires at $T+10$)
+    *   `set('b', 2, 10)` (expires at $T+10$)
+    *   `set('c', 3, 10)` (expires at $T+10$)
+    *   Now `count` is 3.
+    *   `set` logic:
+        1.  `count($map)` is 3. 3 > 2.
+        2.  Scan for expired. None are expired.
+        3.  `count($map)` is still 3. 3 > 2.
+        4.  Evict LRU ('a').
+        5.  `count($map)` is 2.
+    *   Result: `b`, `c` in cache.
+
+    *   `$capacity = 2`.
+    *   `set('a', 1, 1)` (expires at $T+1$)
+    *   `set('b', 2, 10)`
+    *   `set('c', 3, 10)`
+    *   Now `count` is 3.
+    *   `set` logic:
+        1.  `count($map)` is 3. 3 > 2.
+        2.  Scan for expired. 'a' is expired.
+        3.  Remove 'a'.
+        4.  `count($map)` is 2.
+        5.  2 is not > 2.
+    *   Result: `b`, `c` in cache.
+
+    *   `get` must return `null` if the value is `null`.
+    *   `get` must return `$default` if the key is missing or expired.
+    *   In PHP, `isset($this->map[$key])` returns `false` if the value is `null`.
+    *   *Correction*: I am storing `Node` objects in the map, not the values themselves. So `isset($this->map[$key])` will return `true` even if the node's `value` property is `null`. This is correct.
+
+    *   `$clock` is a `\Closure`.
+    *   `$now = ($this->clock)();`
+
+    *   `Node` class:
+        ```php
+        private class Node {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiresAt,
+                public ?Node $prev = null,
+                public ?Node $next = null,
+            ) {}
+        }
+        ```
+    *   `LruCache` class:
+        ```php
+        class LruCache implements \Countable {
+            private int $capacity;
+            /** @var \Closure */
+            private \Closure $clock;
+            /** @var array<string, Node> */
+            private array $map = [];
+            private ?Node $head = null;
+            private ?Node $tail = null;
+
+            public function __construct(int $capacity, ?\Closure $clock = null) {
+                if ($capacity < 1) {
+                    throw new \InvalidArgumentException("Capacity must be >= 1");
+                }
+                $this->capacity = $capacity;
+                $this->clock = $clock ?? fn() => microtime(true);
+            }
+            // ...
+        }
+        ```
+
+    *   `_removeNode(Node $node)`:
+        ```php
+        private function removeNode(Node $node): void {
+            if ($node->prev !== null) {
+                $node->prev->next = $node->next;
+            } else {
+                $this->head = $node->next;
+            }
+            if ($node->next !== null) {
+                $node->next->prev = $node->prev;
+            } else {
+                $this->tail = $node->prev;
+            }
+            $node->prev = null;
+            $node->next = null;
+        }
+        ```
+    *   `_addNodeToTail(Node $node)`:
+        ```php
+        private function addNodeToTail(Node $node): void {
+            $node->next = null;
+            $node->prev = $this->tail;
+            if ($this->tail !== null) {
+                $this->tail->next = $node;
+            }
+            $this->tail = $node;
+            if ($this->head === null) {
+                $this->head = $node;
+            }
+        }
+        ```
+
+    *   `keys()`: "ordered from least recently used to most recently used".
+    *   My `head` is LRU, `tail` is MRU.
+    *   So loop `head` $\to$ `tail`.
+
+    *   `count()`: "number of non-expired entries".
+    *   Loop through the map and check `expiresAt`.
+
+    *   `set` complexity: $O(1)$ average, but $O(n)$ if it triggers the "remove expired" scan. The prompt says "apart from removing expired entries", so this is expected.
+    *   `get` complexity: $O(1)$ average.
+    *   `has` complexity: $O(1)$ average.
+    *   `delete` complexity: $O(1)$ average.
+    *   `count` complexity: $O(n)$.
+    *   `keys` complexity: $O(n)$.
+
+    *   `set` with `ttl <= 0` throws `\InvalidArgumentException`.
+    *   `set` with `ttl = null` means never expires.
+    *   `get` returns `$default` if expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` does not change recency.
+    *   `delete` returns `true` only if non-expired entry existed.
+    *   `count` counts non-expired.
+    *   `keys` returns non-expired keys.
+
+    *   `set` logic:
+        ```php
+        if (count($this->map) > $this->capacity) {
+            $now = ($this->clock)();
+            // 1. Remove expired
+            foreach ($this->map as $key => $node) {
+                if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                    $this->removeNode($node);
+                    unset($this->map[$key]);
+                }
+            }
+            // 2. If still over capacity, evict LRU
+            if (count($this->map) > $this->capacity) {
+                $lru = $this->head;
+                if ($lru !== null) {
+                    $this->removeNode($lru);
+                    unset($this->map[$lru->key]);
+                }
+            }
+        }
+        ```
+    *   Wait, if I use `foreach ($this->map as $key => $node)`, and I `unset($this->map[$key])`, is it safe? Yes, in PHP, unsetting the current element in a `foreach` loop is safe.
+
+    *   Wait, one more thing in `set`: "Replacing an entry also replaces its TTL."
+    *   My code:
+        ```php
+        if (isset($this->map[$key])) {
+            $node = $this->map[$key];
+            $node->value = $value;
+            $node->expiresAt = $expiresAt; // This replaces TTL
+            $this->moveToTail($node);
+        }
+        ```
+        This is correct.
+
+    *   `get` logic:
+        ```php
+        public function get(string $key, mixed $default = null): mixed {
+            if (!isset($this->map[$key])) {
+                return $default;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                $this->deleteNode($node); // Need a helper to remove from map and list
+                return $default;
+            }
+            $this->moveToTail($node);
+            return $node->value;
+        }
+        ```
+    *   Wait, `deleteNode` helper:
+        ```php
+        private function deleteNode(Node $node): void {
+            $this->removeNode($node);
+            unset($this->map[$node->key]);
+        }
+        ```
+
+    *   `delete` logic:
+        ```php
+        public function delete(string $key): bool {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                // It's expired, but the prompt says:
+                // "returns true if a non-expired entry existed"
+                // This is slightly ambiguous. Does "existed" mean "is in the map"
+                // or "is valid"? 
+                // "returns true if a non-expired entry existed" 
+                // implies if it's expired, return false.
+                // Should we also remove it? The prompt doesn't explicitly say 
+                // to remove expired entries on `delete`, but `get` does.
+                // Let's remove it to be clean.
+                $this->deleteNode($node);
+                return false;
+            }
+            $this->deleteNode($node);
+            return true;
+        }
+        ```
+
+    *   `has` logic:
+        ```php
+        public function has(string $key): bool {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                return false;
+            }
+            return true;
+        }
+        ```
+
+    *   `keys` logic:
+        ```php
+        public function keys(): array {
+            $result = [];
+            $current = $this->head;
+            $now = ($this->clock)();
+            while ($current !== null) {
+                if ($current->expiresAt === null || $current->expiresAt > $now) {
+                    $result[] = $current->key;
+                }
+                $current = $current->next;
+            }
+            return $result;
+        }
+        ```
+
+    *   `count` logic:
+        ```php
+        public function count(): int {
+            $count = 0;
+            $now = ($this->clock)();
+            foreach ($this->map as $node) {
+                if ($node->expiresAt === null || $node->expiresAt > $now) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+
+    *   `capacity` must be $\ge 1$. (Checked)
+    *   `ttl` $\le 0$ throws `\InvalidArgumentException`. (Checked)
+    *   `get` returns `$default` if missing or expired. (Checked)
+    *   `get` returns `null` if `null` is stored. (Checked)
+    *   `has` does not change recency. (Checked)
+    *   `delete` returns `true` if non-expired entry existed. (Checked)
+    *   `keys` returns non-expired keys, LRU to MRU. (Checked)
+    *   `count` returns number of non-expired entries. (Checked)
+    *   `set` handles capacity: 1. remove expired, 2. evict LRU. (Checked)
+
+    *   `set` logic: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   My `set` logic:
+        1.  Add/Update entry.
+        2.  If `count($this->map) > $this->capacity`:
+            *   Scan all and remove expired.
+            *   If `count($this->map) > $this->capacity`:
+                *   Remove `head`.
+    *   This matches the requirement exactly.
+
+    *   `get` logic: "A missing or expired entry returns `$default` (an expired entry is removed)."
+    *   My `get` logic:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            $this->deleteNode($node);
+            return $default;
+        }
+        ```
+    *   This matches.
+
+    *   `delete` logic: "removes the entry; returns true if a non-expired entry existed."
+    *   My `delete` logic:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            $this->deleteNode($node); // Remove it anyway
+            return false;
+        }
+        $this->deleteNode($node);
+        return true;
+        ```
+    *   This matches.
+
+    *   `keys` logic: "list of non-expired keys, ordered from least recently used to most recently used."
+    *   My `keys` logic:
+        ```php
+        $current = $this->head; // head is LRU
+        while ($current !== null) {
+            // ...
+            $current = $current->next;
+        }
+        ```
+    *   This matches.
+
+    *   `count` logic: "number of non-expired entries."
+    *   My `count` logic:
+        ```php
+        foreach ($this->map as $node) {
+            if ($node->expiresAt === null || $node->expiresAt > $now) {
+                $count++;
+            }
+        }
+        ```
+    *   This matches.
+
+    *   `Node` class should be private or internal. Since it's a single file, I'll define it as a private class within the same file (but PHP doesn't support nested classes, so it must be a separate class in the same file).
+    *   Wait, the prompt says "a class `LruCache`". It doesn't forbid other classes. I'll use a private `Node` class.
+
+    *   One small detail: `microtime(true)` returns a float. The prompt says `$clock` returns the current time in seconds as a float. This is consistent.
+
+    *   `set` with `ttl = 0`? The prompt says: "A `$ttl` <= 0 throws `\InvalidArgumentException`."
+    *   `set` with `ttl = 0.00001`? That's fine.
+    *   `set` with `ttl = null`? That's fine.
+
+    *   `get` with `null` value:
+        ```php
+        $cache->set('a', null);
+        $cache->get('a', 'default'); // should return null
+        ```
+        My code: `if (!isset($this->map[$key]))` checks if the key exists in the map. Since the map stores `Node` objects, `isset` will be true even if `node->value` is `null`.
+
+    *   Wait, `isset` on an array element: `isset($this->map[$key])` is true if the key exists and the value is not `null`. Since my map values are `Node` objects, and `Node` objects are never `null`, `isset` is a safe way to check for key existence.
+
+    *   Final check on `set` capacity logic:
+        If `capacity` is 1.
+        `set('a', 1)` -> map has 'a'. `count` is 1. 1 > 1 is false.
+        `set('b', 2)` -> map has 'a', 'b'. `count` is 2. 2 > 1 is true.
+        1. Scan expired. None.
+        2. `count` is 2. 2 > 1 is true.
+        3. Remove LRU ('a').
+        4. `count` is 1.
+        Result: 'b' is in cache. Correct.
+
+    *   Wait, what if `set` replaces an existing key?
+        `set('a', 1)` -> map has 'a'.
+        `set('a', 2)` -> map has 'a'. `count` is 1. 1 > 1 is false.
+        Correct.
+
+    *   One edge case: `set` with an expired TTL.
+        `set('a', 1, 0.1)` (at $T=0$)
+        `set('b', 2, 10)` (at $T=0.2$)
+        `set('c', 3, 10)` (at $T=0.2$)
+        When `set('c', 3, 10)` is called:
+        1. Map has 'a', 'b', 'c'. `count` is 3. 3 > 2 is true.
+        2. Scan expired: 'a' is expired ($0.1 \le 0.2$).
+        3. Remove 'a'.
+        4. `count` is 2. 2 > 2 is false.
+        Result: 'b', 'c' in cache. Correct.
+
+    *   Wait, the `set` logic: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   If I have `capacity = 2` and I add a 3rd item, and that 3rd item itself is expired? No, the `set` method says `ttl` must be $> 0$. So the newly added item cannot be expired immediately.
+
+    *   `$capacity` is `int`.
+    *   `$clock` is `?\Closure`.
+    *   `$key` is `string`.
+    *   `$value` is `mixed`.
+    *   `$ttl` is `?float`.
+    *   `$default` is `mixed`.
+    *   `count()` returns `int`.
+    *   `keys()` returns `array`.
+    *   `has()` returns `bool`.
+    *   `delete()` returns `bool`.
+    *   `set()` returns `void`.
+    *   `get()` returns `mixed`.
+
+    *   `Node` class: `public string $key`, `public mixed $value`, `public ?float $expiresAt`, `public ?Node $prev`, `public ?Node $next`.
+    *   `LruCache` class:
+        *   `private array $map`
+        *   `private ?Node $head`
+        *   `private ?Node $tail`
+        *   `private int $capacity`
+        *   `private \Closure $clock`
+
+    *   `set` method:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void
+        {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be > 0");
+            }
+
+            $now = ($this->clock)();
+            $expiresAt = ($ttl !== null) ? ($now + $ttl) : null;
+
+            if (isset($this->map[$key])) {
+                $node = $this->map[$key];
+                $node->value = $value;
+                $node->expiresAt = $expiresAt;
+                $this->moveToTail($node);
+            } else {
+                $node = new Node($key, $value, $expiresAt);
+                $this->map[$key] = $node;
+                $this->addNodeToTail($node);
+            }
+
+            if (count($this->map) > $this->capacity) {
+                foreach ($this->map as $k => $n) {
+                    if ($n->expiresAt !== null && $n->expiresAt <= $now) {
+                        $this->removeNode($n);
+                        unset($this->map[$k]);
+                    }
+                }
+
+                if (count($this->map) > $this->capacity) {
+                    $lru = $this->head;
+                    if ($lru !== null) {
+                        $this->removeNode($lru);
+                        unset($this->map[$lru->key]);
+                    }
+                }
+            }
+        }
+        ```
+
+    *   `get` method:
+        ```php
+        public function get(string $key, mixed $default = null): mixed
+        {
+            if (!isset($this->map[$key])) {
+                return $default;
+            }
+
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                $this->deleteNode($node);
+                return $default;
+            }
+
+            $this->moveToTail($node);
+            return $node->value;
+        }
+        ```
+
+    *   `has` method:
+        ```php
+        public function has(string $key): bool
+        {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                return false;
+            }
+
+            return true;
+        }
+        ```
+
+    *   `delete` method:
+        ```php
+        public function delete(string $key): bool
+        {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+
+            if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+                $this->deleteNode($node);
+                return false;
+            }
+
+            $this->deleteNode($node);
+            return true;
+        }
+        ```
+
+    *   `count` method:
+        ```php
+        public function count(): int
+        {
+            $count = 0;
+            $now = ($this->clock)();
+            foreach ($this->map as $node) {
+                if ($node->expiresAt === null || $node->expiresAt > $now) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+
+    *   `keys` method:
+        ```php
+        public function keys(): array
+        {
+            $keys = [];
+            $current = $this->head;
+            $now = ($this->clock)();
+            while ($current !== null) {
+                if ($current->expiresAt === null || $current->expiresAt > $now) {
+                    $keys[] = $current->key;
+                }
+                $current = $current->next;
+            }
+            return $keys;
+        }
+        ```
+
+    *   `removeNode` and `addNodeToTail` and `moveToTail` and `deleteNode` are internal helpers.
+
+    *   `Node` class:
+        ```php
+        class Node {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiresAt,
+                public ?Node $prev = null,
+                public ?Node $next = null,
+            ) {}
+        }
+        ```
+
+    *   `LruCache` class:
+        ```php
+        class LruCache implements \Countable {
+            private int $capacity;
+            private \Closure $clock;
+            /** @var array<string, Node> */
+            private array $map = [];
+            private ?Node $head = null;
+            private ?Node $tail = null;
+
+            public function __construct(int $capacity, ?\Closure $clock = null) {
+                if ($capacity < 1) {
+                    throw new \InvalidArgumentException("Capacity must be >= 1");
+                }
+                $this->capacity = $capacity;
+                $this->clock = $clock ?? fn() => microtime(true);
+            }
+
+            public function set(string $key, mixed $value, ?float $ttl = null): void { ... }
+            public function get(string $key, mixed $default = null): mixed { ... }
+            public function has(string $key): bool { ... }
+            public function delete(string $key): bool { ... }
+            public function count(): int { ... }
+            public function keys(): array { ... }
+
+            private function moveToTail(Node $node): void {
+                $this->removeNode($node);
+                $this->addNodeToTail($node);
+            }
+
+            private function addNodeToTail(Node $node): void {
+                $node->next = null;
+                $node->prev = $this->tail;
+                if ($this->tail !== null) {
+                    $this->tail->next = $node;
+                }
+                $this->tail = $node;
+                if ($this->head === null) {
+                    $this->head = $node;
+                }
+            }
+
+            private function removeNode(Node $node): void {
+                if ($node->prev !== null) {
+                    $node->prev->next = $node->next;
+                } else {
+                    $this->head = $node->next;
+                }
+                if ($node->next !== null) {
+                    $node->next->prev = $node->prev;
+                } else {
+                    $this->tail = $node->prev;
+                }
+                $node->prev = null;
+                $node->next = null;
+            }
+
+            private function deleteNode(Node $node): void {
+                $this->removeNode($node);
+                unset($this->map[$node->key]);
+            }
+        }
+        ```
+
+    *   Wait, one small detail: `Node` class is used by `LruCache`. In PHP, if I define `class Node` in the same file, it's fine.
+
+    *   `set` complexity: $O(1)$ average, $O(n)$ if expired scan happens.
+    *   `get` complexity: $O(1)$ average.
+    *   `has` complexity: $O(1)$ average.
+    *   `delete` complexity: $O(1)$ average.
+    *   `count` complexity: $O(n)$.
+    *   `keys` complexity: $O(n)$.
+    *   This matches the requirements.
+
+    *   `set` with `ttl = 0` throws `\InvalidArgumentException`.
+    *   `set` with `ttl = -1` throws `\InvalidArgumentException`.
+    *   `set` with `ttl = 0.0` throws `\InvalidArgumentException`.
+    *   `set` with `ttl = 0.0000001` is fine.
+
+    *   Wait, the prompt says: "A `$ttl` <= 0 throws `\InvalidArgumentException`."
+    *   My code: `if ($ttl !== null && $ttl <= 0) { throw new \InvalidArgumentException(...); }`
+    *   This is correct.
+
+    *   `get` with `null` value:
+        ```php
+        $cache->set('a', null);
+        $val = $cache->get('a', 'default');
+        // $this->map['a'] is a Node object.
+        // isset($this->map['a']) is true.
+        // $node->value is null.
+        // returns $node->value, which is null.
+        ```
+    *   Correct.
+
+    *   `keys` order: "ordered from least recently used to most recently used".
+    *   `head` is LRU, `tail` is MRU.
+    *   `while ($current !== null) { $keys[] = $current->key; $current = $current->next; }`
+    *   This will result in `[LRU_key, ..., MRU_key]`.
+    *   Correct.
+
+    *   `count` logic: "number of non-expired entries".
+    *   `foreach ($this->map as $node) { if ($node->expiresAt === null || $node->expiresAt > $now) { $count++; } }`
+    *   Correct.
+
+    *   `delete` logic: "returns true if a non-expired entry existed".
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   `has` logic: "true if the entry exists and is not expired. Does NOT change recency."
+    *   Correct.
+
+    *   `set` logic: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   Correct.
+
+    *   `capacity` must be $\ge 1$.
+    *   `__construct(int $capacity, ?\Closure $clock = null)`
+    *   `set(string $key, mixed $value, ?float $ttl = null): void`
+    *   `get(string $key, mixed $default = null): mixed`
+    *   `has(string $key): bool`
+    *   `delete(string $key): bool`
+    *   `count(): int`
+    *   `keys(): array`
+
+    *   All requirements seem satisfied.
+
+    *   `$this->clock` is a `\Closure`.
+    *   `$now = ($this->clock)();`
+    *   This is correct.
+
+    *   `Node` class:
+        ```php
+        class Node {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiresAt,
+                public ?Node $prev = null,
+                public ?Node $next = null,
+            ) {}
+        }
+        ```
+    *   Wait, `Node` is used in `LruCache` type hints. This is fine in PHP.
+
+    *   Wait, `set` complexity: "apart from removing expired entries".
+    *   If I have 1,000,000 items and I add one more, and I have to scan all 1,000,001 items to see if they are expired, that's $O(n)$. The prompt explicitly allows this.
+
+    *   One more thing: "An entry set at time `t` with TTL `x` is expired at any time `>= t + x`."
+    *   My code: `if ($node->expiresAt !== null && $node->expiresAt <= $now)`
+    *   If `expiresAt` is `t + x`, and `now` is `t + x`, then `expiresAt <= now` is true, so it's expired.
+    *   This matches "expired at any time `>= t + x`".
+
+    *   `get` returns `$default` for expired entries.
+    *   `delete` returns `false` for expired entries.
+    *   `has` returns `false` for expired entries.
+    *   `count` and `keys` only include non-expired entries.
+    *   All these are consistent.
+
+    *   `$capacity` must be $\ge 1$.
+    *   `if ($capacity < 1) { throw new \InvalidArgumentException("..."); }`
+    *   Correct.
+
+    *   `$ttl` must be $> 0$ if not `null`.
+    *   `if ($ttl !== null && $ttl <= 0) { throw new \InvalidArgumentException("..."); }`
+    *   Correct.
+
+    *   `set` replaces TTL.
+    *   `$node->expiresAt = $expiresAt;`
+    *   Correct.
+
+    *   `get` updates recency.
+    *   `$this->moveToTail($node);`
+    *   Correct.
+
+    *   `has` does NOT update recency.
+    *   Correct.
+
+    *   `delete` removes entry.
+    *   Correct.
+
+    *   `count` and `keys` are $O(n)$.
+    *   Correct.
+
+    *   `get`, `set`, `has`, `delete` are $O(1)$ average.
+    *   Correct.
+
+    *   `null` is a valid value.
+    *   Correct.
+
+    *   `keys` order: LRU to MRU.
+    *   Correct.
+
+    *   `capacity` check in `set`:
+        ```php
+        if (count($this->map) > $this->capacity) {
+            // ...
+        }
+        ```
+    *   This is correct. If `capacity` is 2, and we have 2 items, and we add a 3rd, `count` becomes 3, which is `> 2`.
+
+    *   One detail: `microtime(true)` returns a float. The prompt says `$clock` returns a float. This is fine.
+
+    *   Wait, one more thing: `delete` returns `true` if a non-expired entry existed.
+    *   If I call `delete('a')` and 'a' is expired, I should return `false`.
+    *   My code:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            $this->deleteNode($node);
+            return false;
+        }
+        $this->deleteNode($node);
+        return true;
+        ```
+    *   This is correct.
+
+    *   Wait, `set` logic: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   If I have 2 capacity, and I add a 3rd item.
+    *   If that 3rd item is NOT expired (which it can't be, because `ttl > 0`), then `count($this->map)` will be 3.
+    *   Then I scan for expired.
+    *   If I find 1 expired, `count` becomes 2.
+    *   `2 > 2` is false.
+    *   So I don't evict the LRU.
+    *   This is exactly what the prompt says.
+
+    *   Wait, what if I replace an existing key?
+    *   `set('a', 1)`
+    *   `set('a', 2)`
+    *   `count` is still 1. `1 > 2` is false.
+    *   Correct.
+
+    *   Final check on `keys()`:
+        ```php
+        public function keys(): array {
+            $keys = [];
+            $current = $this->head;
+            $now = ($this->clock)();
+            while ($current !== null) {
+                if ($current->expiresAt === null || $current->expiresAt > $now) {
+                    $keys[] = $current->key;
+                }
+                $current = $current->next;
+            }
+            return $keys;
+        }
+        ```
+    *   This is correct.
+
+    *   Final check on `count()`:
+        ```php
+        public function count(): int {
+            $count = 0;
+            $now = ($this->clock)();
+            foreach ($this->map as $node) {
+                if ($node->expiresAt === null || $node->expiresAt > $now) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+    *   This is correct.
+
+    *   Wait, the `Node` class should be defined outside `LruCache` but in the same file.
+
+    *   One last thing: `set` with `ttl = null`.
+    *   `$expiresAt = ($ttl !== null) ? ($now + $ttl) : null;`
+    *   If `ttl` is `null`, `expiresAt` is `null`.
+    *   In `get`, `has`, `delete`, `count`, `keys`:
+        `if ($node->expiresAt !== null && $node->expiresAt <= $now)`
+    *   If `expiresAt` is `null`, the condition is false, so it's not expired.
+    *   This is correct.
+
+    *   `set` with `ttl = 0.5` at `now = 100.0`.
+    *   `expiresAt = 100.5`.
+    *   At `now = 100.5`, `expiresAt <= now` is `100.5 <= 100.5`, which is `true`.
+    *   So it's expired at `100.5`.
+    *   The prompt says: "An entry set at time `t` with TTL `x` is expired at any time `>= t + x`."
+    *   `100.5 >= 100.5` is true.
+    *   Perfect.
+
+    *   `set` with `ttl = 0.5` at `now = 100.0`.
+    *   `expiresAt = 100.5`.
+    *   At `now = 100.4`, `expiresAt <= now` is `100.5 <= 100.4`, which is `false`.
+    *   Not expired.
+    *   Perfect.
+
+    *   `capacity` must be $\ge 1$.
+    *   `if ($capacity < 1) { throw new \InvalidArgumentException("..."); }`
+    *   This is correct.
+
+    *   `ttl` must be $> 0$.
+    *   `if ($ttl !== null && $ttl <= 0) { throw new \InvalidArgumentException("..."); }`
+    *   This is correct.
+
+    *   `get` returns `$default` if missing or expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` returns `true` if exists and not expired.
+    *   `delete` returns `true` if non-expired entry existed.
+    *   `count` returns number of non-expired entries.
+    *   `keys` returns non-expired keys, LRU to MRU.
+    *   `set` handles capacity: 1. remove expired, 2. evict LRU.
+    *   `set` replaces TTL.
+    *   `set` updates recency.
+    *   `get` updates recency.
+    *   `has` does NOT update recency.
+    *   `delete` removes entry.
+    *   `count` and `keys` are $O(n)$.
+    *   `get`, `set`, `has`, `delete` are $O(1)$ average.
+
+    *   Everything looks solid.
+
+    *   Wait, one tiny thing: `count($this->map)` is $O(1)$ in PHP. So `count($this->map) > $this->capacity` is $O(1)$.
+
+    *   Wait, `foreach ($this->map as $k => $n)` is $O(n)$. This is what the prompt says is allowed for the "removing expired entries" part.
+
+    *   Final check on `Node` class visibility. It's not specified, but making it a standard class in the same file is fine.
+
+    *   Wait, `Node` class needs to be defined. I'll make it a simple class.
+
+    *   `LruCache` implements `\Countable`.
+
+    *   `set` method:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void
+        {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be greater than 0.");
+            }
+
+            $now = ($this->clock)();
+            $expiresAt = ($ttl !== null) ? ($now + $ttl) : null;
+
+            if (isset($this->map[$key])) {
+                $node = $this->map[$key];
+                $node->value = $value;
+                $node->expiresAt = $expiresAt;
+                $this->moveToTail($node);
+            } else {
+                $node = new Node($key, $value, $expiresAt);
+                $this->map[$key] = $node;
+                $this->addNodeToTail($node);
+            }
+
+            if (count($this->map) > $this->capacity) {
+                foreach ($this->map as $k => $n) {
+                    if ($n->expiresAt !== null && $n->expiresAt <= $now) {
+                        $this->removeNode($n);
+                        unset($this->map[$k]);
+                    }
+                }
+
+                if (count($this->map) > $this->capacity) {
+                    $lru = $this->head;
+                    if ($lru !== null) {
+                        $this->removeNode($lru);
+                        unset($this->map[$lru->key]);
+                    }
+                }
+            }
+        }
+        ```
+
+    *   Wait, I should make sure `removeNode` and `addNodeToTail` are correct.
+    *   `removeNode`:
+        ```php
+        private function removeNode(Node $node): void
+        {
+            if ($node->prev !== null) {
+                $node->prev->next = $node->next;
+            } else {
+                $this->head = $node->next;
+            }
+
+            if ($node->next !== null) {
+                $node->next->prev = $node->prev;
+            } else {
+                $this->tail = $node->prev;
+            }
+
+            $node->prev = null;
+            $node->next = null;
+        }
+        ```
+    *   `addNodeToTail`:
+        ```php
+        private function addNodeToTail(Node $node): void
+        {
+            $node->next = null;
+            $node->prev = $this->tail;
+
+            if ($this->tail !== null) {
+                $this->tail->next = $node;
+            }
+            $this->tail = $node;
+
+            if ($this->head === null) {
+                $this->head = $node;
+            }
+        }
+        ```
+    *   This is a standard doubly linked list implementation.
+
+    *   One more check: `deleteNode` helper.
+        ```php
+        private function deleteNode(Node $node): void
+        {
+            $this->removeNode($node);
+            unset($this->map[$node->key]);
+        }
+        ```
+    *   This is correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+        ```php
+        public function get(string $key, mixed $default = null): mixed
+        {
+            if (!isset($this->map[$key])) {
+                return $default;
+            }
+            // ...
+            return $node->value;
+        }
+        ```
+    *   If `$node->value` is `null`, it returns `null`.
+    *   If `$key` is not in `$this->map`, it returns `$default`.
+    *   If `$key` is in `$this->map` but expired, it returns `$default`.
+    *   This is correct.
+
+    *   Final check on `has` not changing recency.
+    *   `has` only reads `expiresAt` and `isset`. It does not call `moveToTail`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU (least recently used).
+    *   `tail` is MRU (most recently used).
+    *   `keys()` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Wait, the `Node` class needs to be defined. I'll put it before `LruCache`.
+
+    *   Wait, one more thing: `set` with `ttl = null`.
+    *   `$expiresAt = ($ttl !== null) ? ($now + $ttl) : null;`
+    *   If `ttl` is `null`, `expiresAt` is `null`.
+    *   `if ($node->expiresAt !== null && $node->expiresAt <= $now)`
+    *   If `expiresAt` is `null`, the condition is `false`.
+    *   So it's not expired.
+    *   Correct.
+
+    *   Wait, the prompt says: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   If `capacity` is 10 and I have 10 items, and I add an 11th item.
+    *   `count($this->map)` is 11.
+    *   `11 > 10` is true.
+    *   I scan for expired.
+    *   If I find 1 expired, `count` becomes 10.
+    *   `10 > 10` is false.
+    *   I don't evict the LRU.
+    *   This is correct.
+
+    *   Wait, what if I replace an existing key and it was expired?
+    *   The `set` method says: "inserts or replaces an entry and makes it the most recently used."
+    *   It doesn't say anything about checking if the *existing* entry was expired.
+    *   But if I'm replacing it, it doesn't matter if it was expired or not.
+    *   My code:
+        ```php
+        if (isset($this->map[$key])) {
+            $node = $this->map[$key];
+            $node->value = $value;
+            $node->expiresAt = $expiresAt;
+            $this->moveToTail($node);
+        }
+        ```
+    *   This is correct.
+
+    *   One last thing: The `Node` class properties are `public` to allow `LruCache` to access them easily. This is fine.
+
+    *   Final check on `count()` and `keys()`: they both use `$this->clock`.
+    *   `$now = ($this->clock)();`
+    *   This is correct.
+
+    *   Final check on `delete()`: "returns true if a non-expired entry existed."
+    *   If the entry is expired, it returns `false`.
+    *   My code:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            $this->deleteNode($node);
+            return false;
+        }
+        $this->deleteNode($node);
+        return true;
+        ```
+    *   This is correct.
+
+    *   Final check on `set()`: "A `$ttl` <= 0 throws `\InvalidArgumentException`."
+    *   My code: `if ($ttl !== null && $ttl <= 0) { throw new \InvalidArgumentException("..."); }`
+    *   This is correct.
+
+    *   Final check on `__construct()`: "$capacity must be >= 1, otherwise throw `\InvalidArgumentException`."
+    *   My code: `if ($capacity < 1) { throw new \InvalidArgumentException("..."); }`
+    *   This is correct.
+
+    *   Final check on `get()`: "A missing or expired entry returns `$default` (an expired entry is removed)."
+    *   My code:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            $this->deleteNode($node);
+            return $default;
+        }
+        ```
+    *   This is correct.
+
+    *   Final check on `has()`: "true if the entry exists and is not expired. Does NOT change recency."
+    *   My code:
+        ```php
+        if ($node->expiresAt !== null && $node->expiresAt <= $now) {
+            return false;
+        }
+        return true;
+        ```
+    *   This is correct.
+
+    *   Final check on `keys()`: "list of non-expired keys, ordered from least recently used to most recently used."
+    *   My code:
+        ```php
+        $current = $this->head; // head is LRU
+        while ($current !== null) {
+            if ($current->expiresAt === null || $current->expiresAt > $now) {
+                $keys[] = $current->key;
+            }
+            $current = $current->next;
+        }
+        ```
+    *   This is correct.
+
+    *   Final check on `count()`: "number of non-expired entries."
+    *   My code:
+        ```php
+        foreach ($this->map as $node) {
+            if ($node->expiresAt === null || $node->expiresAt > $now) {
+                $count++;
+            }
+        }
+        ```
+    *   This is correct.
+
+    *   The `Node` class should be defined before `LruCache` or after. It doesn't matter in PHP.
+
+    *   Wait, one more thing. In `set`, if I replace an entry, I should not check the capacity.
+    *   My code:
+        ```php
+        if (isset($this->map[$key])) {
+            // ... update ...
+        } else {
+            // ... add ...
+        }
+        if (count($this->map) > $this->capacity) {
+            // ...
+        }
+        ```
+    *   If I replace an entry, `count($this->map)` stays the same. So `count($this->map) > $this->capacity` will be false (assuming it was already within capacity).
+    *   If I add an entry, `count($this->map)` increases. If it exceeds capacity, the capacity logic triggers.
+    *   This is correct.
+
+    *   Wait, what if `capacity` is 1, and I have 1 item, and I replace it? `count` is 1. `1 > 1` is false. Correct.
+    *   What if `capacity` is 1, and I have 1 item, and I add a second? `count` is 2. `2 > 1` is true. Correct.
+
+    *   The `Node` class can be `private` if it's inside the same file, but PHP doesn't have private classes. I'll just define it as a regular class.
+
+    *   Final check on `set` with `ttl = 0`.
+    *   `if ($ttl !== null && $ttl <= 0) { throw new \InvalidArgumentException("..."); }`
+    *   This is correct.
+
+    *   Final check on `set` with `ttl = null`.
+    *   `$expiresAt = ($ttl !== null) ? ($now + $ttl) : null;`
+    *   This is correct.
+
+    *   Final check on `get` with `null` value.
+    *   `$node->value` is `null`.
+    *   `return $node->value;` returns `null`.
+    *   Correct.
+
+    *   Final check on `has` with `null` value.
+    *   `isset($this->map[$key])` is true.
+    *   `$node->expiresAt` is checked.
+    *   Returns `true`.
+    *   Correct.
+
+    *   Final check on `delete` with `null` value.
+    *   `isset($this->map[$key])` is true.
+    *   `$node->expiresAt` is checked.
+    *   `deleteNode($node)` is called.
+    *   Returns `true`.
+    *   Correct.
+
+    *   Final check on `count` with `null` value.
+    *   `foreach ($this->map as $node)`
+    *   `$node->expiresAt` is checked.
+    *   `$count++` is called.
+    *   Correct.
+
+    *   Final check on `keys` with `null` value.
+    *   `$current->expiresAt` is checked.
+    *   `$keys[] = $current->key` is called.
+    *   Correct.
+
+    *   Final check on `set` with `ttl` replacement.
+    *   `$node->expiresAt = $expiresAt;`
+    *   Correct.
+
+    *   Final check on `set` with `value` replacement.
+    *   `$node->value = $value;`
+    *   Correct.
+
+    *   Final check on `set` with `recency` update.
+    *   `$this->moveToTail($node);`
+    *   Correct.
+
+    *   Everything is ready.
+
+    *   Wait, one last thing. The `Node` class should be defined in the same file.
+
+    ```php
+    <?php
+
+    class Node {
+        public function __construct(
+            public string $key,
+            public mixed $value,
+            public ?float $expiresAt,
+            public ?Node $prev = null,
+            public ?Node $next = null,
+        ) {}
+    }
+
+    class LruCache implements \Countable {
+        // ...
+    }
+    ```
+
+    *   One more thing: `microtime(true)` returns a float. The prompt says `$clock` returns a float. This is consistent.
+
+    *   Wait, the `set` method: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   If I have 10 capacity, and I add an 11th item.
+    *   The 11th item is added. `count` is 11.
+    *   I scan for expired.
+    *   If I find 0 expired, `count` is still 11.
+    *   `11 > 10` is true.
+    *   I remove the LRU.
+    *   `count` is 10.
+    *   This is correct.
+
+    *   Wait, what if the 11th item *is* the LRU? (Not possible, it's the MRU).
+    *   What if the 11th item is expired? (Not possible, `ttl > 0`).
+
+    *   Wait, what if the 11th item is added, and it's the *only* item? (Capacity $\ge 1$).
+    *   If capacity is 1, and I add the 1st item, `count` is 1. `1 > 1` is false.
+    *   If capacity is 1, and I add the 2nd item, `count` is 2. `2 > 1` is true.
+    *   Scan for expired.
+    *   If 0 expired, `count` is 2. `2 > 1` is true.
+    *   Remove LRU.
+    *   `count` is 1.
+    *   Correct.
+
+    *   One more thing: `get` and `delete` should remove expired entries.
+    *   `get`: "A missing or expired entry returns `$default` (an expired entry is removed)."
+    *   `delete`: "removes the entry; returns true if a non-expired entry existed."
+    *   My code does this.
+
+    *   Final check on `set` with `ttl` replacement.
+    *   `$node->expiresAt = $expiresAt;`
+    *   Correct.
+
+    *   Final check on `set` with `value` replacement.
+    *   `$node->value = $value;`
+    *   Correct.
+
+    *   Final check on `set` with `recency` update.
+    *   `$this->moveToTail($node);`
+    *   Correct.
+
+    *   Final check on `has` not changing recency.
+    *   `has` does not call `moveToTail`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count` returns number of non-expired entries.
+    *   Correct.
+
+    *   Final check on `set` capacity logic.
+    *   If `count($this->map) > $this->capacity`:
+        1. Scan and remove expired.
+        2. If still `count($this->map) > $this->capacity`, remove LRU.
+    *   Correct.
+
+    *   Final check on `get` returning `null` if `null` is stored.
+    *   `isset($this->map[$key])` is true if the key exists in the map (because the value is a `Node` object).
+    *   `$node->value` is returned.
+    *   Correct.
+
+    *   Final check on `delete` returning `true` if non-expired entry existed.
+    *   If entry is expired, `delete` returns `false`.
+    *   If entry is not expired, `delete` returns `true`.
+    *   Correct.
+
+    *   Final check on `has` returning `true` if exists and not expired.
+    *   Correct.
+
+    *   Final check on `set` with `ttl <= 0` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `capacity < 1` throwing `\InvalidArgumentException`.
+    *   Correct.
+
+    *   Final check on `__construct` with `clock`.
+    *   Correct.
+
+    *   Final check on `keys` order.
+    *   `head` is LRU, `tail` is MRU.
+    *   `keys` returns `[LRU, ..., MRU]`.
+    *   Correct.
+
+    *   Final check on `count`.
+    *   `count

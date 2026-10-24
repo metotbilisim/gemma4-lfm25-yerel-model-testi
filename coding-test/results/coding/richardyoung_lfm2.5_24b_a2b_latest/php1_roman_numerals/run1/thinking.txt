@@ -1,0 +1,531 @@
+We need to produce PHP 8.4 code containing a final class RomanNumerals (no namespace). Must have static methods:
+
+- toRoman(int $n): string: convert 1..3999 to standard subtractive Roman numeral. For any other number, throw \InvalidArgumentException.
+
+- fromRoman(string $s): int: convert a Roman numeral back to integer. Must accept only canonical numerals that exactly match strings produced by toRoman. Anything else throws \InvalidArgumentException: empty string, lowercase letters, surrounding whitespace, other characters, non-canonical forms like "IIII", "VV", etc.
+
+- add(string $a, string $b): string: adds two Roman numerals and returns the result as a Roman numeral. Must throw \InvalidArgumentException if either input is invalid or sum out of range (i.e., >3999? Or maybe > 3999 because conversion only defined up to 3999). The spec says "if either input is invalid or the sum is out of range". So if sum > 3999, also throw.
+
+We need to ensure that fromRoman only accepts canonical strings. That includes proper subtractive notation: e.g., I=1, V=5, X=10, L=50, C=100, D=500, M=1000. Standard Roman numeral rules: Only allowed subtractive pairs: IV (4), IX (9), XL (40), XC (90), CD (400), CM (900). Also cannot have more than three consecutive same symbols (e.g., IIII invalid). Must be exactly the output of toRoman.
+
+Thus fromRoman must validate that input string is a valid Roman numeral according to canonical rules. If not, throw \InvalidArgumentException.
+
+Implementation details:
+
+- We'll need mapping for conversion: integer to roman: typical algorithm using arrays of values and symbols in descending order: 1000->M, 900->CM, 500->D, 400->CD, 100->C, 90->XC, 50->L, 40->XL, 10->X, 9->IX, 5->V, 4->IV, 1->I.
+
+- For fromRoman: parse string left to right. Use mapping of single characters and subtractive pairs. Approach: iterate over characters, if current character and next form a valid subtractive pair (like IV, IX, XL...), then add the corresponding value and skip two characters; else just add value of char. At end, check that the resulting integer is within 1..3999? Actually fromRoman must accept only canonical numerals produced by toRoman, which are in range 1..3999. So if conversion yields a number outside that range (should not happen for valid canonical strings), but we can also throw.
+
+But need to ensure that fromRoman rejects non-canonical forms: e.g., "IIII" -> algorithm would parse as I+I+I+I = 4? Actually typical parsing: if you treat each char individually, you'd get 1+1+1+1=4, but canonical representation is "IV". So fromRoman must detect that it's not a valid canonical form. The spec says accept only strings toRoman can produce. So we need to validate that the string matches exactly the output of toRoman for that integer.
+
+Simplify: We could generate all possible canonical Roman numerals (1..3999) using toRoman and store them in an associative array mapping int->string, then fromRoman just checks if $s is in that map. That ensures strict compliance. However, generating all 3999 strings might be okay but could be heavy but fine for runtime. But we must keep code simple.
+
+Alternatively, implement validation logic: check characters are only I,V,X,L,C,D,M; ensure no invalid subtractive combos (like IL, IC, ID, IM, VX etc). Also ensure that the numeral is in correct order: symbols must be non-increasing except for subtractive pairs. And no more than three repeats.
+
+Given constraints, easiest is to generate mapping of all canonical strings: static $canonical = []; for ($i=1;$i<=3999;$i++) { $canonical[$i] = toRoman($i); } Then fromRoman: if (!isset($this->canonical[$s])) throw \InvalidArgumentException; else return $this->canonical[$s]; But we need static method, can't store static property? We can have a private static array inside class. That's allowed.
+
+But careful: toRoman is static method that returns string. So we can generate mapping in the class as static property (maybe const?). Since PHP 8.4 supports readonly properties? Not needed. We'll just compute on first call? But generating all at class definition time might be heavy but okay.
+
+Alternatively, implement validation manually. Let's think about complexity: The spec demands that fromRoman must accept only canonical numerals exactly those produced by toRoman. If we generate mapping and check existence, it's safe. However, the mapping generation uses toRoman which itself must be correct. That's fine.
+
+But note: The class is final with static methods only. So we can have a private static array $canonicalMap; but need to initialize it maybe in a static initializer? In PHP you can't have static initialization blocks before 8.2? Actually you can use static function to lazily generate. But easier: just compute on demand inside fromRoman: if not found, throw.
+
+But we need to ensure that toRoman is defined before fromRoman uses it (order of method definitions doesn't matter). We'll implement toRoman first.
+
+Implementation details:
+
+- toRoman: Input int $n. Validate 1 <= $n <= 3999; else throw \InvalidArgumentException.
+
+- Use array of pairs: $values = [1000 => 'M', 900 => 'CM', ...]. Actually typical algorithm uses descending order list of [value, numeral] pairs.
+
+Pseudo:
+
+public static function toRoman(int $n): string {
+    if ($n < 1 || $n > 3999) {
+        throw new \InvalidArgumentException('Number out of range');
+    }
+    $result = '';
+    $pairs = [
+        1000 => 'M',
+        900 => 'CM',
+        500 => 'D',
+        400 => 'CD',
+        100 => 'C',
+        90 => 'XC',
+        50 => 'L',
+        40 => 'XL',
+        10 => 'X',
+        9 => 'IX',
+        5 => 'V',
+        4 => 'IV',
+        1 => 'I',
+    ];
+    foreach ($pairs as $value => $symbol) {
+        while ($n >= $value) {
+            $result .= $symbol;
+            $n -= $value;
+        }
+    }
+    return $result;
+}
+
+That's standard.
+
+Now fromRoman: We'll need to ensure canonical. Approach: Use mapping generation:
+
+private static function $canonicalMap = []; // but static property must be defined at class level.
+
+We can define a private static array inside class, maybe as const? But we need dynamic values. Could compute lazily: In fromRoman, if not found in map, generate mapping up to the integer value of string? That's tricky.
+
+Simpler: Validate manually:
+
+- If $s is empty => throw.
+
+- Trim whitespace? Actually spec says surrounding whitespace is invalid: empty after trimming? It says "empty string, surrounding whitespace" are invalid. So we must not trim; treat as invalid if string contains any leading/trailing whitespace. So check: if ($s === '') or (preg_match('/^\s+/', $s) || preg_match('/\s$/', $s)) => throw.
+
+- Check that all characters are among 'IVXLCDM' (uppercase). If not, throw.
+
+- Then parse and validate canonical rules:
+
+We need to ensure it's exactly the canonical representation. Could implement a validation algorithm: iterate through string; keep track of previous symbol values; ensure non-increasing order except for allowed subtractive pairs.
+
+Simplify: Use known valid patterns? Not trivial.
+
+Alternative: Since we have toRoman generating mapping, easiest is to store all canonical strings in a static array. Let's do that.
+
+Define:
+
+private static $canonical = [];
+
+But static property must be defined at class level. We'll define:
+
+final class RomanNumerals
+{
+    private static array $canonicalMap = [];
+
+    // static methods
+
+    public static function toRoman(int $n): string { ... }
+
+    public static function fromRoman(string $s): int {
+        if (self::$canonicalMap === []) {
+            // Build map lazily: generate all canonical strings
+            for ($i=1;$i<=3999;$i++) {
+                self::$canonicalMap[self::toRoman($i)] = $i;
+            }
+        }
+        if (!isset(self::$canonicalMap[$s])) {
+            throw new \InvalidArgumentException('Invalid Roman numeral');
+        }
+        return self::$canonicalMap[$s];
+    }
+
+    public static function add(string $a, string $b): string {
+        // Validate both a and b using fromRoman (or toRoman? Actually they must be valid numerals)
+        try {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e; // rethrow
+        }
+        $sum = $valA + $valB;
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+        return self::toRoman($sum);
+    }
+}
+
+But note: toRoman returns string; fromRoman returns int.
+
+Potential issues: The add method must also ensure that the sum is within range (1..3999). If sum = 0? Not possible because both inputs are >=1. But if sum >3999, throw.
+
+Now about validation of a and b: they could be invalid roman numerals; fromRoman will throw if invalid. So we can just call fromRoman for each and catch exception to rethrow.
+
+But need to ensure that add also validates that inputs are valid roman numerals (i.e., canonical). That's done by fromRoman.
+
+Now about throwing \InvalidArgumentException: Use the built-in exception class.
+
+Edge Cases:
+
+- toRoman: For numbers like 0 or negative or >3999 => throw.
+
+- fromRoman: Input empty string => throw. Lowercase letters => invalid characters => throw. Surrounding whitespace => we check. Non-canonical forms: e.g., "IIII" is not in map => throw. "VV" also not in map. "IC" etc not in map.
+
+Thus using map ensures strict acceptance.
+
+Potential performance: building map each time add is called? We'll lazily build only once; static property initially empty; first call to fromRoman triggers generation of all 3999 entries (cost okay). But if we call fromRoman many times, it's fine.
+
+But need to ensure that toRoman is deterministic and used for mapping. However, building map uses toRoman which may be expensive but okay.
+
+Potential issue: The static property $canonicalMap must be accessible within static methods; we can use self::.
+
+Now about final class: final class RomanNumerals { ... }
+
+No namespace.
+
+The file must start with <?php and contain no output (no echo). No test/demo code.
+
+Thus final code:
+
+<?php
+final class RomanNumerals
+{
+    /** @var array<int,string> */
+    private static array $canonicalMap = [];
+
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+
+        $result = '';
+        $values = [
+            1000 => 'M',
+            900  => 'CM',
+            500  => 'D',
+            400  => 'CD',
+            100  => 'C',
+            90   => 'XC',
+            50   => 'L',
+            40   => 'XL',
+            10   => 'X',
+            9    => 'IX',
+            5    => 'V',
+            4    => 'IV',
+            1    => 'I',
+        ];
+
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        // Validate input: empty string
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty Roman numeral');
+        }
+
+        // Ensure no surrounding whitespace
+        if (preg_match('/^\s/') || preg_match('/\s$/', $s)) {
+            throw new \InvalidArgumentException('Roman numeral contains surrounding whitespace');
+        }
+
+        // All characters must be uppercase Roman letters
+        if (!preg_match('/^[IVXLCDM]+$/', $s)) {
+            throw new \InvalidArgumentException('Invalid characters in Roman numeral');
+        }
+
+        // Build canonical map if not already built
+        if (empty(self::$canonicalMap)) {
+            for ($i = 1; $i <= 3999; $i++) {
+                self::$canonicalMap[self::toRoman($i)] = $i;
+            }
+        }
+
+        if (!isset(self::$canonicalMap[$s])) {
+            throw new \InvalidArgumentException('Non-canonical Roman numeral');
+        }
+
+        return self::$canonicalMap[$s];
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        // Validate inputs using fromRoman (which checks canonical)
+        try {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+
+        $sum = $valA + $valB;
+
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of allowed range');
+        }
+
+        return self::toRoman($sum);
+    }
+}
+
+But need to ensure that fromRoman's validation includes detection of non-canonical forms like "IIII". Since we built map using toRoman, which only generates canonical strings, any non-canonical will not be in map => throw. Good.
+
+Now about error messages: Not required but fine.
+
+Potential issues:
+
+- The regex for whitespace: preg_match('/^\s/') is wrong; should be '/^\s/'? Actually need to match start of string followed by whitespace: '/^\s/' works? In PHP, \s inside pattern needs escaping? It's fine. But better: if (preg_match('/^\s/', $s) || preg_match('/\s$/', $s)). That's okay.
+
+- The character validation: /^[IVXLCDM]+$/ ensures only uppercase letters. Good.
+
+- But we also need to reject lowercase letters; the regex will reject them, causing throw.
+
+- Also need to reject empty string: handled.
+
+Now about add method: It uses fromRoman for both a and b. If either invalid, throws \InvalidArgumentException. Then sum range check.
+
+Potential edge case: Input strings may be valid roman numerals but not canonical? Eg "IIII" is not canonical; fromRoman will throw because not in map. Good.
+
+Now about toRoman: Must produce standard subtractive form. Our algorithm does that.
+
+Testing: Let's test mental examples:
+
+- toRoman(4) => "IV". Yes.
+
+- toRoman(1994) => M (1000) -> remainder 994; 900->CM, remainder 94; 90->XC, remainder 4; 4->IV. So "MCMXCIV". Good.
+
+- toRoman(3999) => "MMMCMXCIX"? Let's compute: 3000 = MMM, 900=CM, 90=XC, 9=IX => "MMMCMXCIX". Yes.
+
+- fromRoman("MCMXCIV") => Should return 1994. Since map includes it, yes.
+
+- fromRoman("IIII") => not in map => throw.
+
+- add: add("III", "IV") => 3+4=7 => toRoman(7) => "VII". Good.
+
+- add("MMMCMXCIX", "I") => 3999+1=4000 >3999 => throw.
+
+Now about exception type: Must be \InvalidArgumentException. We're throwing that.
+
+Potential issues: In fromRoman we call self::toRoman inside static map generation; toRoman may itself throw if out-of-range numbers (but we only generate 1..3999). Good.
+
+Now check that the class is final and no namespace. Yes.
+
+We must not print anything. No echo statements.
+
+Thus final code block:
+
+<?php
+final class RomanNumerals
+{
+    private static array $canonicalMap = [];
+
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+
+        $result = '';
+        $values = [
+            1000 => 'M',
+            900  => 'CM',
+            500  => 'D',
+            400  => 'CD',
+            100  => 'C',
+            90   => 'XC',
+            50   => 'L',
+            40   => 'XL',
+            10   => 'X',
+            9    => 'IX',
+            5    => 'V',
+            4    => 'IV',
+            1    => 'I',
+        ];
+
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty Roman numeral');
+        }
+
+        // Check for surrounding whitespace
+        if (preg_match('/^\s/', $s) || preg_match('/\s$/', $s)) {
+            throw new \InvalidArgumentException('Roman numeral contains surrounding whitespace');
+        }
+
+        // Ensure only valid characters
+        if (!preg_match('/^[IVXLCDM]+$/', $s)) {
+            throw new \InvalidArgumentException('Invalid characters in Roman numeral');
+        }
+
+        // Build canonical map lazily
+        if (empty(self::$canonicalMap)) {
+            for ($i = 1; $i <= 3999; $i++) {
+                self::$canonicalMap[self::toRoman($i)] = $i;
+            }
+        }
+
+        if (!isset(self::$canonicalMap[$s])) {
+            throw new \InvalidArgumentException('Non-canonical Roman numeral');
+        }
+
+        return self::$canonicalMap[$s];
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        try {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+
+        $sum = $valA + $valB;
+
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+
+        return self::toRoman($sum);
+    }
+}
+
+Check that we didn't include any test code. Good.
+
+Potential improvements: The add method's exception handling is redundant; we can just let fromRoman throw. But it's okay.
+
+One nuance: In fromRoman, after building map, we check isset(self::$canonicalMap[$s]). However, the map keys are integer values? Actually we used self::$canonicalMap[self::toRoman($i)] = $i; So key is string roman numeral, value int. That's fine.
+
+Now about the regex for whitespace: preg_match('/^\s/', $s) - need to escape? In PHP, \s inside single quotes works. It's okay.
+
+Potential bug: The regex '/^\s/' matches any whitespace at start; but if string is empty, we already caught earlier. Good.
+
+Now about lowercase letters: The regex will reject them because they aren't in [IVXLCDM]. So throw.
+
+Now about non-canonical forms: Not in map => throw.
+
+Thus code meets requirements.
+
+But need to ensure that the method signatures match exactly: static methods with names toRoman, fromRoman, add. Yes.
+
+Now check that toRoman returns string; we used string.
+
+Potential issues: The static property $canonicalMap is private; fine.
+
+Now about PHP version: 8.4 features? Not needed but code uses typed properties and maybe named arguments? It's okay.
+
+Edge Cases:
+
+- toRoman(0) throws exception.
+
+- fromRoman(" ") (space only) -> not empty but contains whitespace; our check for surrounding whitespace will catch because preg_match('/^\s/') matches start, but string is just space; it will throw. Also regex for characters fails? Actually space not in [IVXLCDM], so also throws earlier. But we have both checks.
+
+- fromRoman("M") -> valid; returns 1000.
+
+- add("M", "M") => 2000 => toRoman(2000) => "MM". Good.
+
+- add("MMMCMXCIX", "I"): sum=4000 => out of range => throw.
+
+Now about the exception messages: Not required but fine.
+
+Potential performance: Building map each time fromRoman is called for first time; okay.
+
+One more nuance: In fromRoman we call self::toRoman inside static map generation. But toRoman may throw if $n out-of-range (should not happen). Good.
+
+Now ensure that the class is final and no namespace. Yes.
+
+Thus final answer: Provide code block with <?php ... ?> containing the class.
+
+We must output only the code block, not any extra text. The instruction: "Return the complete file in a single ```php code block." So we need to embed the code inside triple backticks with php language spec.
+
+Thus final output:
+
+```php
+<?php
+final class RomanNumerals
+{
+    private static array $canonicalMap = [];
+
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+
+        $result = '';
+        $values = [
+            1000 => 'M',
+            900  => 'CM',
+            500  => 'D',
+            400  => 'CD',
+            100  => 'C',
+            90   => 'XC',
+            50   => 'L',
+            40   => 'XL',
+            10   => 'X',
+            9    => 'IX',
+            5    => 'V',
+            4    => 'IV',
+            1    => 'I',
+        ];
+
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty Roman numeral');
+        }
+
+        // Check for surrounding whitespace
+        if (preg_match('/^\s/', $s) || preg_match('/\s$/', $s)) {
+            throw new \InvalidArgumentException('Roman numeral contains surrounding whitespace');
+        }
+
+        // Ensure only valid characters
+        if (!preg_match('/^[IVXLCDM]+$/', $s)) {
+            throw new \InvalidArgumentException('Invalid characters in Roman numeral');
+        }
+
+        // Build canonical map lazily
+        if (empty(self::$canonicalMap)) {
+            for ($i = 1; $i <= 3999; $i++) {
+                self::$canonicalMap[self::toRoman($i)] = $i;
+            }
+        }
+
+        if (!isset(self::$canonicalMap[$s])) {
+            throw new \InvalidArgumentException('Non-canonical Roman numeral');
+        }
+
+        return self::$canonicalMap[$s];
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        try {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+
+        $sum = $valA + $valB;
+
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+
+        return self::toRoman($sum);
+    }
+}
+```

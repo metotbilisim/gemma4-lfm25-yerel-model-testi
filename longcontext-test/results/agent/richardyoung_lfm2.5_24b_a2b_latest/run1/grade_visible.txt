@@ -1,0 +1,15 @@
+(node:30324) Warning: Accessing non-existent property 'RefundError' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ money.format (0.9907ms)
+✔ simple order totals (0.6783ms)
+✔ percentage coupon is applied before VAT (BUG-101) (0.2681ms)
+✔ failed order leaves stock untouched (BUG-102) (0.3502ms)
+✔ partial refund basic (FEAT-200) (0.3318ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 67.9785

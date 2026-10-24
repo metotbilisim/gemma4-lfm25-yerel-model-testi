@@ -1,0 +1,1364 @@
+We need to write PHP 8.4 code containing a class LruCache (no namespace). It must implement Countable interface (so we need to implement count(): int). The class implements per-entry TTL.
+
+We need to ensure:
+
+- Constructor: __construct(int $capacity, ?\Closure $clock = null). Capacity >= 1 else throw \InvalidArgumentException. Clock is a callable that returns current time in seconds as float; if null, use microtime(true) (i.e., current time as float with microseconds). Always read time through the clock.
+
+- set(string $key, mixed $value, ?float $ttl = null): void
+   - Insert or replace entry and make it most recently used.
+   - $ttl is seconds; null means never expires. If $ttl <= 0 throws \InvalidArgumentException. Replacing an entry also replaces its TTL.
+   - If after insertion the number of entries > capacity, first remove expired entries; if still over capacity, evict least recently used (LRU) entry.
+
+- get(string $key, mixed $default = null): mixed
+   - Returns value and makes entry most recently used. Missing or expired returns $default. Note that null is a valid stored value and must be returned as null, not as $default. So if the stored value is null, we should return null (the actual stored null). If default is null, ambiguous? But spec says: "A missing or expired entry returns $default (an expired entry is removed). Note that null is a valid stored value and must be returned as null, not as $default." So if the key exists but its stored value is null, we should return null. If the key does not exist or is expired, return default (which could also be null). But if default is null and entry missing/expired, returning null is same as default; fine.
+
+- has(string $key): bool - true if entry exists and not expired. Does NOT change recency.
+
+- delete(string $key): bool - removes entry; returns true if a non-expired entry existed.
+
+- count(): int - number of non-expired entries.
+
+- keys(): array - list of non-expired keys, ordered from least recently used to most recently used. Keys must be returned exactly as given (as strings).
+
+We need O(1) average for get/set/has/delete (apart from removing expired entries). We'll implement using a doubly linked list for LRU ordering plus an associative array mapping key => node (or entry). Each entry includes value, ttl expiration time (maybe stored as expiry timestamp: if ttl null, set expiry = INF or never). Also need to store creation time? Not needed. For TTL we compute expiry = clock() + $ttl if ttl not null; else expiry = INF.
+
+When checking expiration, we compare current time (via clock) >= expiry.
+
+We also need to evict expired entries when capacity exceeded after set: first remove all expired entries (maybe scanning all entries? That's O(n)). But spec says "first remove expired entries; if still over capacity, evict the least recently used entry." Since we need O(1) average for set aside from removal of expired entries. The removal of expired entries can be done by iterating through all entries? That could be O(n). However typical LRU caches with TTL often do lazy expiration: check expiry when accessed (get/has/delete). But spec says "if the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry." So set must enforce capacity after insertion. We'll need to possibly remove expired entries before insertion? Or after insertion? Let's parse: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+
+Interpretation: After inserting a new entry (or replacing), we may exceed capacity. Then we need to remove expired entries (i.e., any entries whose TTL has passed). If after removal of expired entries the count is still > capacity, then evict LRU entries until at most capacity.
+
+Thus set algorithm:
+
+1. If $key already exists: update value and TTL (if provided) and move node to MRU position. Also need to handle expiration? If existing entry is expired? Should we treat as missing? Usually if it's expired, it should be considered not present; but spec says "has returns true if entry exists and is not expired." So an expired entry is effectively removed (or considered missing). For set: if key exists but is expired? The spec doesn't explicitly say. But typical behavior: If key existed but expired, treat as missing, then insertion will be like new entry; but also need to consider capacity. We'll implement: In set, first check if key exists in the map (including possibly expired?). But we can treat that as not existing for LRU ordering. However, if it's expired, we should delete it (or ignore). Let's think.
+
+Simplify: When setting a key:
+
+- If key already present in cache (i.e., entry exists and not expired), then update its value/TTL and move to MRU.
+- Else (key not present or expired): treat as new insertion. We'll need to possibly evict old entries.
+
+But we also need to handle removal of expired entries before capacity check: The spec says "first remove expired entries; if still over capacity, evict the least recently used entry."
+
+Thus after insertion (or replacement), we may have > capacity entries (including the new one). We'll run a loop to remove expired entries: iterate through all entries and delete those whose expiry <= current time. That's O(n) but only when needed.
+
+But we need to keep O(1) average for set aside from removal of expired entries. Since removal of expired entries is allowed O(n) (they said "apart from removing expired entries").
+
+Implementation details:
+
+We'll maintain a doubly linked list: each node has key, value, expiry (float or null/infinite). We'll have head and tail pointers for LRU order: head = least recently used, tail = most recently used. On get/set we move node to tail (MRU). On delete we unlink.
+
+We also need a map: $cache = [] mapping key => Node.
+
+Node structure: public $key; public $value; public $expiry; // float or null for no expiration? We'll use something like INF (e.g., PHP_INT_MAX) for never-expire. Or store boolean hasTtl.
+
+We need to compute expiry time: if ttl is null => expiry = INF (or a sentinel). else expiry = clock() + $ttl.
+
+But careful: The TTL may be zero or negative? They said "A $ttl <= 0 throws \InvalidArgumentException." So we must throw if $ttl <= 0. If $ttl is positive, it's fine.
+
+Now about the clock: We'll store a callable $clock; default null => use microtime(true). In each method where time needed (like checking expiration), we need to get current time via $this->clock().
+
+Define private function getClock(): float { return $this->clock !== null ? ($this->clock()) : microtime(true); }
+
+Now for LRU ordering: We'll implement a simple linked list:
+
+class Node {
+    public string $key;
+    public mixed $value;
+    public float $expiry; // if null means never expires? We'll treat as INF.
+    public Node $prev;
+    public Node $next;
+
+    public function __construct(string $key, mixed $value, float $expiry) {
+        $this->key = $key;
+        $this->value = $value;
+        $this->expiry = $expiry;
+        $this->prev = null;
+        $this->next = null;
+    }
+}
+
+We'll maintain $head (LRU) and $tail (MRU). On insertion at MRU: create node, link after tail, update tail; if list empty, head=tail=node.
+
+When moving a node to MRU (after get or set), we need to unlink it from its current position and re-link at tail.
+
+Implementation details:
+
+- has(key): check if key exists in map and not expired. If exists but expired: treat as missing => return false. Should not change recency. So we need to check expiry using current time. If expired, maybe delete it? The spec for has: "true if entry exists and is not expired." It doesn't say to delete; but for consistency, we could just return false without modifying LRU. However, if we later set that key, the old node may still be present (expired). But set will treat as new entry anyway? Let's think.
+
+If has returns true only if not expired, then after expiration, has returns false. If we later call set on same key, it should treat as new insertion (since it's missing). That's fine. The old node remains in list but is expired; but we might want to clean it up eventually. We'll implement removal of expired entries lazily when needed (like in count/keys or capacity enforcement). But for has we can just check expiry and return false.
+
+- get(key, $default): If key exists and not expired: move node to MRU, return value. If missing or expired: delete the entry? The spec says "A missing or expired entry returns $default (an expired entry is removed)." So after returning default, we should remove the expired entry from cache (i.e., delete it). That's consistent with removal of expired entries. Also if key exists but value is null, return null.
+
+- delete(key): If entry exists and not expired: unlink node, remove from map, return true; else return false.
+
+- count(): number of non-expired entries. We'll need to iterate over all entries and count those whose expiry > current time (or infinite). That's O(n) allowed.
+
+- keys(): list of non-expired keys ordered from LRU (least recently used) to MRU (most recently used). So we need to traverse from head to tail, but only include those not expired. Also need to return exactly as given: keys are strings; they are stored as strings anyway.
+
+Implementation details for capacity enforcement:
+
+In set:
+
+- If key exists: update node's value and TTL (if new ttl). Then move to MRU. After that, check if number of entries > capacity? Actually after insertion we may exceed capacity. The spec says "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+
+But note: If key existed (replaced), capacity may not increase beyond limit. But they said "if the cache now holds more than capacity entries". So after insertion (including replacement) we need to check if size > capacity.
+
+Thus algorithm:
+
+set($key, $value, ?$ttl):
+1. Get current time via clock().
+2. If $key exists in map:
+   - node = map[$key];
+   - Update node->value = $value.
+   - Compute new expiry: if $ttl !== null: expiry = currentTime + $ttl; else expiry = INF (or a large number).
+   - node->expiry = expiry;
+   - Move node to MRU (unlink and re-add at tail).
+   - // After updating, check capacity.
+3. Else:
+   - Compute expiry: if $ttl !== null: expiry = currentTime + $ttl; else INF.
+   - Create new Node($key, $value, expiry).
+   - Add to map and list at MRU.
+4. After insertion/replacement (or after step 2/3), we need to enforce capacity:
+   - First, remove expired entries: iterate over all entries? That's O(n). But spec says removal of expired entries is allowed O(n) aside from set's average O(1). We'll implement a method removeExpired() that loops through all keys in map (or list) and checks expiry > current time. If expired, delete it (call delete internal method). This will reduce count.
+   - After removing expired entries, if size > capacity:
+        - Need to evict LRU entries: while size > capacity: remove node at head (LRU). Unlink and delete from map.
+   - Note: When evicting due to capacity, we should not consider TTL; just evict LRU regardless of expiration. But spec says after removing expired entries, if still over capacity, evict LRU.
+
+Potential issue: If we remove expired entries first, then capacity may become <= capacity. If still > capacity, evict LRU entries (which are the least recently used among remaining). That's fine.
+
+Edge Cases:
+- Capacity must be >=1; else throw InvalidArgumentException.
+- TTL <=0 throws InvalidArgumentException.
+- When $ttl is null: never expires. We'll treat expiry = INF (like PHP_INT_MAX). Or we can store a boolean hasTtl and treat accordingly. For simplicity, set expiry = PHP_INT_MAX.
+
+Now about the clock: The time used for expiration must be consistent: all checks use same clock function. In removeExpired we need to get current time via clock().
+
+Implementation details:
+
+We'll have private properties:
+- int $capacity;
+- ?Closure $clock;
+- Node $head = null; // LRU
+- Node $tail = null; // MRU
+- array $map = []; // key => Node
+
+Define Node class inside LruCache? Since no namespace, we can define a nested class or just use a simple struct-like array. But easier: define a private class Node.
+
+Now implement methods:
+
+private function getClock(): float {
+    return $this->clock !== null ? ($this->clock()) : microtime(true);
+}
+
+private function isExpired(Node $node): bool {
+    // If expiry is INF (never expires), not expired.
+    return $node->expiry <= $this->getClock();
+}
+But careful: expiry is a float; if never expires we set to PHP_INT_MAX. Then expiry <= current time? No, it's huge > current time always false.
+
+Now for LRU operations:
+
+private function addToTail(Node $node): void {
+    // Insert after tail
+    if ($this->tail === null) {
+        $this->head = $this->tail = $node;
+    } else {
+        $this->tail->next = $node;
+        $node->prev = $this->tail;
+        $node->next = null;
+        $this->tail = $node;
+    }
+}
+
+private function moveToTail(Node $node): void {
+    // If node already at tail? We'll just unlink and re-add.
+    if ($node === $this->tail) return;
+    // Unlink
+    $node->prev->next = $node->next;
+    if ($node->next !== null) {
+        $node->next->prev = $node->prev;
+    } else {
+        // node was head
+        $this->head = $node->next;
+    }
+    // Add to tail
+    $this->addToTail($node);
+}
+
+private function removeNode(Node $node): void {
+    // Unlink from list
+    if ($node->prev !== null) {
+        $node->prev->next = $node->next;
+    } else {
+        $this->head = $node->next;
+    }
+    if ($node->next !== null) {
+        $node->next->prev = $node->prev;
+    } else {
+        $this->tail = $node->prev;
+    }
+    $node->prev = null;
+    $node->next = null;
+}
+
+Now set:
+
+public function set(string $key, mixed $value, ?float $ttl = null): void {
+    if ($this->capacity < 1) { // but capacity is validated in constructor.
+    }
+
+    $currentTime = $this->getClock();
+
+    // Check if key exists
+    if (isset($this->map[$key])) {
+        $node = &$this->map[$key];
+        // Update value
+        $node->value = $value;
+        // Compute new expiry
+        if ($ttl !== null) {
+            if ($ttl <= 0) {
+                throw new \InvalidArgumentException('TTL must be greater than zero');
+            }
+            $node->expiry = $currentTime + $ttl;
+        } else {
+            $node->expiry = PHP_INT_MAX; // never expires
+        }
+        // Move to MRU
+        $this->moveToTail($node);
+    } else {
+        // New entry
+        if ($ttl !== null) {
+            if ($ttl <= 0) {
+                throw new \InvalidArgumentException('TTL must be greater than zero');
+            }
+            $expiry = $currentTime + $ttl;
+        } else {
+            $expiry = PHP_INT_MAX;
+        }
+        $node = new Node($key, $value, $expiry);
+        $this->map[$key] = $node;
+        $this->addToTail($node);
+    }
+
+    // After insertion, enforce capacity
+    $this->enforceCapacity($currentTime);
+}
+
+private function enforceCapacity(float $currentTime): void {
+    // First remove expired entries
+    $this->removeExpired($currentTime);
+    // If still over capacity, evict LRU
+    while (countNonExpired() > $this->capacity) {
+        // Remove head (LRU)
+        if ($this->head === null) break;
+        $nodeToRemove = $this->head;
+        // Unlink and delete from map
+        $keyToRemove = $nodeToRemove->key;
+        // Remove from list
+        $this->removeNode($nodeToRemove);
+        unset($this->map[$keyToRemove]);
+    }
+}
+
+private function removeExpired(float $currentTime): void {
+    // Iterate over all keys in map (maybe copy keys)
+    // Since we may modify map while iterating, better to collect keys to delete.
+    $keys = array_keys($this->map);
+    foreach ($keys as $key => $node) {
+        if ($node->expiry <= $currentTime) {
+            // Expired
+            $this->removeNode($node);
+            unset($this->map[$key]);
+        }
+    }
+}
+
+But note: removeExpired uses currentTime; after we call enforceCapacity, we pass the same time. However, inside set we might have added a new entry with expiry maybe in future. The removal of expired entries should be based on current time at that moment.
+
+Potential issue: In removeExpired we also need to consider that some nodes may have been moved to tail (MRU) after insertion; but expiration check is independent.
+
+Now countNonExpired(): We'll implement a method that counts non-expired entries. It can be used for capacity checks.
+
+private function countNonExpired(): int {
+    $count = 0;
+    foreach ($this->map as $node) {
+        if ($node->expiry > $this->getClock()) { // Actually expiry > current time means not expired; if expiry <= current => expired.
+            $count++;
+        }
+    }
+    return $count;
+}
+
+But careful: If expiry is INF (PHP_INT_MAX), then it's > current time always true.
+
+Now count(): returns countNonExpired().
+
+keys(): returns array of keys in order from LRU to MRU, only non-expired. We'll traverse list from head to tail, and for each node if not expired (expiry > currentTime) add key to result.
+
+Implementation:
+
+public function keys(): array {
+    $result = [];
+    $currentTime = $this->getClock();
+    $node = $this->head;
+    while ($node !== null) {
+        if ($node->expiry > $currentTime) {
+            $result[] = $node->key;
+        }
+        $node = $node->next;
+    }
+    return $result;
+}
+
+Now get:
+
+public function get(string $key, mixed $default = null): mixed {
+    $currentTime = $this->getClock();
+    if (!isset($this->map[$key])) {
+        // Not present
+        return $default;
+    }
+    $node = &$this->map[$key];
+    // Check expiration
+    if ($node->expiry <= $currentTime) {
+        // Expired: remove it
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        return $default;
+    }
+    // Not expired: move to MRU
+    $this->moveToTail($node);
+    return $node->value;
+}
+
+But note: If the stored value is null, we must return null (the actual null). That's fine.
+
+has(string $key): returns bool. Should not change recency. Implementation:
+
+public function has(string $key): bool {
+    $currentTime = $this->getClock();
+    if (!isset($this->map[$key])) {
+        return false;
+    }
+    $node = $this->map[$key];
+    if ($node->expiry <= $currentTime) {
+        // Expired: treat as missing; optionally remove? The spec doesn't require removal. But we can just return false.
+        // However, to keep consistency, maybe we should delete expired entries? Not required for has. We'll not delete.
+        return false;
+    }
+    return true;
+}
+
+delete(string $key): bool {
+    $currentTime = $this->getClock();
+    if (!isset($this->map[$key])) {
+        return false;
+    }
+    $node = &$this->map[$key];
+    if ($node->expiry <= $currentTime) {
+        // Expired entry: treat as missing; remove? The spec says returns true if a non-expired entry existed. So expired => false.
+        return false;
+    }
+    // Remove from list and map
+    $this->removeNode($node);
+    unset($this->map[$key]);
+    return true;
+}
+
+Now need to ensure that when we replace an existing key with set, we also handle TTL replacement: done.
+
+Potential issues: In set, after updating node's expiry (if ttl provided), we must treat the case where ttl is null => never expires. That's fine.
+
+Now about capacity enforcement: After insertion, we call enforceCapacity($currentTime). But note that after removal of expired entries and eviction, we might have removed some entries; but we also need to ensure that if capacity is exceeded due to new entry (or replacement) we handle accordingly.
+
+Edge Cases:
+
+- If capacity = 0? Constructor throws exception. So not needed.
+
+- If TTL is extremely large causing overflow? Not needed.
+
+- The clock: default null => use microtime(true). That's a float seconds with microseconds. We'll treat as double.
+
+Now about O(1) average: Our get/set/delete involve linked list operations O(1) plus possibly removal of expired entries which may be O(n). That's allowed.
+
+Potential bug: In set, when key exists and we update TTL, we need to ensure that if new TTL is null (no expiration), we set expiry = INF. Already done.
+
+Now about the removal of expired entries in enforceCapacity: We call removeExpired($currentTime) which iterates over all keys. But after we remove some expired nodes, we may still have entries that are not expired but exceed capacity; then evict LRU.
+
+But note: In removeExpired we also need to consider that some nodes might be at head (LRU) and expired; they will be removed anyway. That's fine.
+
+Now about count(): Should return number of non-expired entries. We'll implement as countNonExpired().
+
+Now about keys(): Return list of non-expired keys in LRU->MRU order. Our traversal from head to tail includes only non-expired ones (skip expired). However, if some expired nodes are still present in the list (not removed), they will be skipped. That's okay.
+
+Potential issue: When we remove expired entries via countNonExpired or keys, we need to ensure that we don't leave dangling references. In removeExpired we call removeNode($node) and unset map. That's fine.
+
+Now about the LRU order after removal of expired nodes: The list may contain expired nodes that haven't been removed yet; they remain in list but will be ignored in keys/has/etc. However, they might affect count? No, count only counts non-expired.
+
+But for has and delete we treat expired as missing; they remain in list until later removal (maybe when capacity enforced). That's okay.
+
+Now about moving nodes to tail: In get/set we call moveToTail which updates LRU order. However, after set with new key, we add to tail. Good.
+
+Potential bug: In set when key exists, after updating node->expiry and moving to tail, we need to ensure that if TTL is null (no expiration) we set INF; else compute expiry based on currentTime. That's correct.
+
+Now about capacity enforcement: After insertion (including replacement), we call enforceCapacity. But note that when key existed, the number of entries didn't increase (size unchanged). However, if we replaced an existing entry with a new TTL? It doesn't affect count. But still we might exceed capacity due to previous expired entries? Actually capacity enforcement after set ensures that after insertion we have at most capacity non-expired entries. If we had old expired entries still in list, they may be counted in size but not in non-expired count. However enforceCapacity uses countNonExpired() which excludes expired ones. But if there are many expired entries, the number of non-expired may be below capacity; but we might still have more than capacity entries including expired ones. The spec says "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry." This suggests that after insertion, total entries (including possibly expired) > capacity? Or non-expired? Usually capacity refers to number of entries (including expired?). But typical caches limit number of stored items regardless of expiration. However they say "non-expired entries" for count. The spec for count: number of non-expired entries. For keys: list of non-expired keys. So capacity likely applies to non-expired entries? Not clear. But we can interpret as after insertion, if the number of non-expired entries > capacity, then evict LRU. However they also say "first remove expired entries". That suggests that after removal of expired entries, if still over capacity (i.e., more than capacity non-expired?), evict LRU.
+
+Thus our enforceCapacity uses countNonExpired() to decide if we need to evict. That's consistent: after removing expired entries, if the number of remaining non-expired entries > capacity, evict LRU until size <= capacity.
+
+But what about the case where there are many expired entries and total entries (including expired) exceed capacity? The spec didn't mention cleaning up expired entries automatically; but we only remove expired when needed (get/delete/capacity enforcement). In set, after insertion we first remove expired entries (which may reduce count below capacity). If still > capacity, evict LRU. That's fine.
+
+Now about the removal of expired entries: We need to ensure that we don't inadvertently remove entries that are not expired but are at head due to LRU ordering? No, we only remove those with expiry <= currentTime.
+
+Potential concurrency issues: Not relevant.
+
+Now about the clock: In set we call getClock() at start. But after insertion, when we compute new expiry for a new entry, we used currentTime (the time at set). That's correct.
+
+But what about TTL replacement: If existing key has TTL null (never expires) and we call set with ttl = 5, we update expiry to currentTime + 5. Good.
+
+Now about get: If entry exists but is expired, we delete it and return default. That's consistent with "expired entry is removed". Good.
+
+Now about has: Should not change recency; we just check expiration without moving node. Good.
+
+Now about delete: If entry exists and not expired, remove and return true; else false.
+
+Now about count(): Use countNonExpired().
+
+Now about keys(): Return list of keys from LRU to MRU (excluding expired). Implementation as described.
+
+Now about the constructor:
+
+public function __construct(int $capacity, ?Closure $clock = null) {
+    if ($capacity < 1) {
+        throw new \InvalidArgumentException('Capacity must be at least 1');
+    }
+    $this->capacity = $capacity;
+    $this->clock = $clock;
+    $this->head = null;
+    $this->tail = null;
+    $this->map = [];
+}
+
+Now about the class: No namespace.
+
+Define Node as private static? We'll define inside LruCache as a private class.
+
+Potential memory leaks: Not needed.
+
+Now test with some scenarios mentally:
+
+Case 1: capacity=2. set('a',1). No TTL. After set, list: a (MRU). count=1. keys=['a'].
+
+set('b',2). Now list: b MRU, a LRU? Actually after each set we move to tail; so order: a (LRU), b (MRU). count=2.
+
+set('c',3) capacity=2. Insert c: map size before insertion =2 (a,b). After insertion, size becomes 3 > capacity. First remove expired (none). Then evict LRU: head is a (least recently used). Remove a. Now map has b,c. Count=2. Keys order: LRU? After eviction, list: b (LRU), c (MRU). Good.
+
+Now test TTL: set('a',1,1.0) with clock at t=0. Then after 1.5 seconds, get('a') should be default. But we need to simulate time via clock. In code, get uses getClock() each time; if we call get after some time passes (by calling set with a clock that returns later values?), but typical usage: The user may provide a custom clock for testing. That's okay.
+
+Now about the requirement: "Always read time through the clock." So all time checks must use getClock(). In removeExpired we used currentTime variable passed from enforceCapacity (which got from set). That's fine.
+
+Potential bug: In enforceCapacity, after removeExpired we call countNonExpired() again; but countNonExpired uses getClock() again. Since time hasn't changed between calls (unless some time passes), it's okay. But if time passes slightly, still fine.
+
+Now about the removal of expired entries: We iterate over all keys in map; but after we remove a node, we need to ensure that we don't try to access node after unsetting? In our code we do:
+
+foreach ($keys as $key => $node) {
+    if ($node->expiry <= $currentTime) {
+        $this->removeNode($node);
+        unset($this->map[$key]);
+    }
+}
+
+But note: We are using $node reference from map; after we unset map[$key], it's okay. However, if we later try to access $node->expiry after unsetting? Not needed.
+
+Potential issue: In removeExpired we call removeNode($node) which modifies the list and sets node->prev = null etc. That's fine.
+
+Now about countNonExpired: We'll implement as:
+
+private function countNonExpired(): int {
+    $currentTime = $this->getClock();
+    $count = 0;
+    foreach ($this->map as $node) {
+        if ($node->expiry > $currentTime) {
+            $count++;
+        }
+    }
+    return $count;
+}
+
+Now about keys: We'll implement similarly.
+
+Potential bug: In keys() we also need to consider that some nodes may be expired but still in list; we skip them. That's fine.
+
+Now about the LRU order after removal of expired entries: The list still contains expired nodes (if not removed). But they will be ignored in keys and count. However, they may affect has/get/delete? For has we treat as missing. For delete we treat as false if expired. So it's okay.
+
+Now about moving nodes to tail when updating existing key: In set for existing key, after updating node->expiry and calling moveToTail($node). That's fine.
+
+Now about the case where TTL is null: We set expiry = PHP_INT_MAX. However, if we later call get after a huge time (like > PHP_INT_MAX?), not needed.
+
+Now about the custom clock: The user may pass a Closure that returns float seconds. We'll store as ?Closure $clock. In getClock we check if $this->clock !== null then call it; else use microtime(true). That's correct.
+
+Now about the requirement: "The file must start with <?php. It must not print anything and must not contain test or demo code."
+
+Thus we just provide class definition.
+
+Now ensure that we implement Countable interface: The class must implement \Countable. So we need to declare "implements \Countable". Also we need to implement count(): int.
+
+Thus:
+
+class LruCache implements \Countable {
+    // ...
+    public function count(): int { return $this->countNonExpired(); }
+}
+
+Now ensure that all methods have correct signatures.
+
+Potential issues: In get, we used $node = &$this->map[$key]; but if key exists, we need to capture reference. That's okay.
+
+But careful: In PHP, when you do $node = &$this->map[$key]; it's a reference to the Node object. Then later we modify $node->value etc. That's fine.
+
+Now about the removal of node in get: We called $this->removeNode($node); but removeNode expects Node object; we passed $node (reference). However, after removeNode, the node is unlinked and its prev/next set to null. That's fine.
+
+But note: In get, after we detect expiration, we call removeNode($node) which will modify the list. Then we unset map. That's okay.
+
+Now about has: Should not change recency; we don't move node.
+
+Now about delete: We also need to unlink node and remove from map.
+
+Potential bug: In delete, after checking expiration, if expired, return false. If not expired, we call removeNode($node) and unset map. That's fine.
+
+Now about capacity enforcement: In set, after insertion we call enforceCapacity(currentTime). However, note that after removal of expired entries, the number of non-expired entries may be less than capacity, but there might still be more total entries (including expired) > capacity. But spec says "if still over capacity, evict the least recently used entry." Since we only removed expired entries first, if after that we still exceed capacity (i.e., countNonExpired > capacity), we evict LRU. That's correct.
+
+Now about the order of removal: In enforceCapacity, we call removeExpired($currentTime) then while countNonExpired() > capacity: remove head (LRU). However, after removing some expired entries, the head may be an expired node? Actually after removeExpired, all expired nodes should have been removed. But there could be non-expired nodes that are also at head (if no expired). So evicting LRU works.
+
+Now about the scenario where capacity is 0: Not allowed.
+
+Now about TTL <=0: Throw InvalidArgumentException. We must check before setting expiry. In set, if $ttl !== null and $ttl <= 0 => throw. Also for get/has/delete we don't need to check TTL.
+
+Now about the case where $ttl is positive but very large causing overflow? Not needed.
+
+Now about the custom clock: The user may pass a Closure that returns float seconds; we call it each time we need current time. In set, we used getClock() at start for computing expiry for new entry and also for capacity enforcement. That's fine.
+
+Potential concurrency: Not needed.
+
+Now about the requirement: "An entry set at time t with TTL x is expired at any time >= t + x." So if current time equals exactly t+x, it's expired. Our condition $node->expiry <= $currentTime covers that (since expiry <= currentTime => expired). Good.
+
+Now about the keys order: "ordered from least recently used to most recently used". That's what we do: head is LRU, tail is MRU. So traversal from head to tail yields LRU->MRU. Good.
+
+Now about returning keys: Must be exactly as given (strings). Our keys are stored as strings; we return them.
+
+Now about the count: Should be number of non-expired entries. We'll implement accordingly.
+
+Now about the default parameter for get: $default = null. If entry missing/expired, return $default. But if default is null and entry exists with value null, we must return null (the stored value). That's consistent: In that case, get returns node->value which is null. Good.
+
+Now about the scenario where default is something else; if entry missing/expired, return default (even if default is null). That's fine.
+
+Now about the method signatures:
+
+- __construct(int $capacity, ?\Closure $clock = null)
+- set(string $key, mixed $value, ?float $ttl = null): void
+- get(string $key, mixed $default = null): mixed
+- has(string $key): bool
+- delete(string $key): bool
+- count(): int
+- keys(): array
+
+All good.
+
+Now about the class: No namespace. We'll define:
+
+<?php
+
+class LruCache implements \Countable {
+    // ...
+}
+
+Now implement Node as private static? We'll define inside class:
+
+private class Node { ... }
+
+But PHP allows nested classes. We'll do:
+
+private class Node {
+    public string $key;
+    public mixed $value;
+    public float $expiry;
+    public ?Node $prev; // Actually need to allow null for head/tail? We'll use ?Node.
+    public ?Node $next;
+
+But we can't have nullable type with union? In PHP 8.4, we can use ?Node. But we need to assign null for head initially. So Node's prev/next can be ?Node.
+
+Simplify: Use objects; but not needed.
+
+We'll define:
+
+private class Node {
+    public string $key;
+    public mixed $value;
+    public float $expiry;
+    public ?Node $prev;
+    public ?Node $next;
+
+    public function __construct(string $key, mixed $value, float $expiry) {
+        $this->key = $key;
+        $this->value = $value;
+        $this->expiry = $expiry;
+        $this->prev = null;
+        $this->next = null;
+    }
+}
+
+Now in LruCache we have properties:
+
+private int $capacity;
+private ?Closure $clock;
+private ?Node $head = null;
+private ?Node $tail = null;
+private array $map = []; // string => Node
+
+Now implement methods.
+
+Potential issues: In set, when key exists and we update node->expiry, we must also consider that if TTL is null (no expiration) we set to PHP_INT_MAX. That's done.
+
+Now about the removal of expired entries: We'll create a method removeExpired(float $currentTime): void.
+
+Implementation:
+
+private function removeExpired(float $currentTime): void {
+    // Iterate over copy of keys
+    foreach (array_keys($this->map) as $key) {
+        $node = $this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            // Unlink and delete from map
+            $this->removeNode($node);
+            unset($this->map[$key]);
+        }
+    }
+}
+
+But note: removeNode expects Node; we pass node. That's fine.
+
+Now about countNonExpired: We'll implement as private method countNonExpired(): int.
+
+private function countNonExpired(): int {
+    $currentTime = $this->getClock();
+    $count = 0;
+    foreach ($this->map as $node) {
+        if ($node->expiry > $currentTime) {
+            $count++;
+        }
+    }
+    return $count;
+}
+
+Now about keys: We'll implement as public function keys(): array.
+
+public function keys(): array {
+    $currentTime = $this->getClock();
+    $result = [];
+    $node = $this->head;
+    while ($node !== null) {
+        if ($node->expiry > $currentTime) {
+            $result[] = $node->key;
+        }
+        $node = $node->next;
+    }
+    return $result;
+}
+
+Now about get: Already described.
+
+Potential bug: In get, after we detect expiration and remove node, we must also ensure that we don't accidentally treat the removed node as default. That's fine.
+
+Now about has: Implementation:
+
+public function has(string $key): bool {
+    $currentTime = $this->getClock();
+    if (!isset($this->map[$key])) {
+        return false;
+    }
+    $node = $this->map[$key];
+    if ($node->expiry <= $currentTime) {
+        // expired; treat as missing
+        return false;
+    }
+    return true;
+}
+
+Now about delete: Implementation:
+
+public function delete(string $key): bool {
+    $currentTime = $this->getClock();
+    if (!isset($this->map[$key])) {
+        return false;
+    }
+    $node = &$this->map[$key];
+    if ($node->expiry <= $currentTime) {
+        // expired, treat as missing
+        return false;
+    }
+    $this->removeNode($node);
+    unset($this->map[$key]);
+    return true;
+}
+
+Now about set: Already described.
+
+Potential bug: In set, after updating node->expiry for existing key, we need to call moveToTail($node). However, if the node was already at tail (MRU), moveToTail will check and return early. That's fine.
+
+Now about capacity enforcement: We'll implement enforceCapacity as private method:
+
+private function enforceCapacity(float $currentTime): void {
+    // Remove expired entries first
+    $this->removeExpired($currentTime);
+    // If still over capacity, evict LRU
+    while ($this->countNonExpired() > $this->capacity) {
+        if ($this->head === null) {
+            break;
+        }
+        $nodeToRemove = $this->head;
+        $keyToRemove = $nodeToRemove->key;
+        // Remove from list and map
+        $this->removeNode($nodeToRemove);
+        unset($this->map[$keyToRemove]);
+    }
+}
+
+But note: In removeExpired we already removed expired entries. However, after removal of expired entries, some nodes may have been removed, so countNonExpired may be less than capacity; loop won't run.
+
+Now about the order of operations: Should we call removeExpired before checking capacity? Yes.
+
+Potential issue: In set, if key existed and we updated TTL but didn't exceed capacity, we still call enforceCapacity. That's fine.
+
+Now about the removal of expired entries: We used foreach(array_keys($this->map) as $key => $node). But after we remove a node, we unset map[$key]; but we are iterating over array_keys which is a copy, so it's safe.
+
+Now about the time functions: In getClock we need to handle if clock is null. Use microtime(true). That returns a float with seconds and microseconds. Good.
+
+Now about the requirement: "Always read time through the clock." So in all places where we need current time (like checking expiration), we must use getClock(). We did that.
+
+Now about the custom clock: If user passes a Closure, we call it. The closure should return float seconds. We'll assume correct.
+
+Now about potential errors: In set when $ttl is null, we set expiry = PHP_INT_MAX. But if we later compute expiry > currentTime for non-expired check, it's always true. Good.
+
+Now about the case where TTL is extremely small (like 0.1). That's fine.
+
+Now about the requirement: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry." Our enforceCapacity does exactly that.
+
+Potential nuance: After removal of expired entries, there might be more than capacity entries (including both non-expired and expired). But we only removed expired ones. The spec says "first remove expired entries; if still over capacity, evict the least recently used entry." That implies after removing expired entries, if the total number of entries (including possibly still-expired ones?) is still > capacity, then evict LRU. However, typical interpretation: After removal of expired entries, you may have less than capacity; else you need to evict LRU until size <= capacity. Since we only count non-expired for capacity, it's okay.
+
+But what if there are many expired entries and total entries > capacity? Then after removing expired entries, the count of non-expired may be below capacity, so no eviction needed. That's acceptable.
+
+Now about the LRU ordering: When we evict LRU, we remove from head. That's correct.
+
+Now about the case where capacity is 1 and we set two different keys sequentially: After first set, count=1. Second set: insertion triggers removal of expired (none), then capacity exceeded => evict LRU (head) which is the first key. Then add new key. So final cache contains only second key. That's correct.
+
+Now about the scenario where we update an existing key with a TTL: Should not affect capacity. Good.
+
+Now about the method signatures: We must ensure that return types are correct: get returns mixed (type hint? Not required). But we can just return mixed.
+
+Now about the Countable interface: We need to implement count(): int. So we do:
+
+public function count(): int {
+    return $this->countNonExpired();
+}
+
+Now about the keys method: Should return array of strings. We'll ensure that.
+
+Now about the overall structure: We'll write the class with all methods.
+
+Potential improvements: Use type hints for parameters where appropriate.
+
+Now let's write code step by step.
+
+We'll start with <?php
+
+class LruCache implements \Countable {
+    private int $capacity;
+    private ?Closure $clock;
+    private ?Node $head = null;
+    private ?Node $tail = null;
+    private array $map = [];
+
+    // Node class
+    private class Node {
+        public string $key;
+        public mixed $value;
+        public float $expiry;
+        public ?Node $prev;
+        public ?Node $next;
+
+        public function __construct(string $key, mixed $value, float $expiry) {
+            $this->key = $key;
+            $this->value = $value;
+            $this->expiry = $expiry;
+            $this->prev = null;
+            $this->next = null;
+        }
+    }
+
+    public function __construct(int $capacity, ?Closure $clock = null) {
+        if ($capacity < 1) {
+            throw new \InvalidArgumentException('Capacity must be at least 1');
+        }
+        $this->capacity = $capacity;
+        $this->clock = $clock;
+    }
+
+    private function getClock(): float {
+        return $this->clock !== null ? ($this->clock()) : microtime(true);
+    }
+
+    // LRU list operations
+    private function addToTail(Node $node): void {
+        if ($this->tail === null) {
+            $this->head = $this->tail = $node;
+        } else {
+            $this->tail->next = $node;
+            $node->prev = $this->tail;
+            $node->next = null;
+            $this->tail = $node;
+        }
+    }
+
+    private function moveToTail(Node $node): void {
+        if ($node === $this->tail) {
+            return;
+        }
+        // Unlink node
+        if ($node->prev !== null) {
+            $node->prev->next = $node->next;
+        } else {
+            // node is head
+            $this->head = $node->next;
+        }
+        if ($node->next !== null) {
+            $node->next->prev = $node->prev;
+        } else {
+            // node is tail (should not happen)
+            $this->tail = $node->prev;
+        }
+        // Add to tail
+        $this->addToTail($node);
+    }
+
+    private function removeNode(Node $node): void {
+        if ($node->prev !== null) {
+            $node->prev->next = $node->next;
+        } else {
+            $this->head = $node->next;
+        }
+        if ($node->next !== null) {
+            $node->next->prev = $node->prev;
+        } else {
+            $this->tail = $node->prev;
+        }
+        $node->prev = null;
+        $node->next = null;
+    }
+
+    // Capacity enforcement
+    private function enforceCapacity(float $currentTime): void {
+        // Remove expired entries first
+        $this->removeExpired($currentTime);
+        // If still over capacity, evict LRU
+        while ($this->countNonExpired() > $this->capacity) {
+            if ($this->head === null) {
+                break;
+            }
+            $nodeToRemove = $this->head;
+            $keyToRemove = $nodeToRemove->key;
+            $this->removeNode($nodeToRemove);
+            unset($this->map[$keyToRemove]);
+        }
+    }
+
+    private function removeExpired(float $currentTime): void {
+        foreach (array_keys($this->map) as $key => $node) {
+            if ($node->expiry <= $currentTime) {
+                $this->removeNode($node);
+                unset($this->map[$key]);
+            }
+        }
+    }
+
+    private function countNonExpired(): int {
+        $currentTime = $this->getClock();
+        $count = 0;
+        foreach ($this->map as $node) {
+            if ($node->expiry > $currentTime) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    public function set(string $key, mixed $value, ?float $ttl = null): void {
+        $currentTime = $this->getClock();
+
+        if (isset($this->map[$key])) {
+            $node = &$this->map[$key];
+            $node->value = $value;
+            if ($ttl !== null) {
+                if ($ttl <= 0) {
+                    throw new \InvalidArgumentException('TTL must be greater than zero');
+                }
+                $node->expiry = $currentTime + $ttl;
+            } else {
+                $node->expiry = PHP_INT_MAX;
+            }
+            $this->moveToTail($node);
+        } else {
+            if ($ttl !== null) {
+                if ($ttl <= 0) {
+                    throw new \InvalidArgumentException('TTL must be greater than zero');
+                }
+                $expiry = $currentTime + $ttl;
+            } else {
+                $expiry = PHP_INT_MAX;
+            }
+            $node = new Node($key, $value, $expiry);
+            $this->map[$key] = $node;
+            $this->addToTail($node);
+        }
+
+        // Enforce capacity
+        $this->enforceCapacity($currentTime);
+    }
+
+    public function get(string $key, mixed $default = null): mixed {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return $default;
+        }
+        $node = &$this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            // Expired: remove
+            $this->removeNode($node);
+            unset($this->map[$key]);
+            return $default;
+        }
+        // Not expired: move to MRU
+        $this->moveToTail($node);
+        return $node->value;
+    }
+
+    public function has(string $key): bool {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return false;
+        }
+        $node = $this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            return false;
+        }
+        return true;
+    }
+
+    public function delete(string $key): bool {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return false;
+        }
+        $node = &$this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            // Expired entry: treat as missing
+            return false;
+        }
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        return true;
+    }
+
+    public function count(): int {
+        return $this->countNonExpired();
+    }
+
+    public function keys(): array {
+        $currentTime = $this->getClock();
+        $result = [];
+        $node = $this->head;
+        while ($node !== null) {
+            if ($node->expiry > $currentTime) {
+                $result[] = $node->key;
+            }
+            $node = $node->next;
+        }
+        return $result;
+    }
+}
+
+Now check for any missing parts: The Node class is private, but we need to reference it as Node inside LruCache. Since it's private nested, we can still use Node type. In set we create new Node(...). That's fine.
+
+Potential issues: In removeNode we used $node->prev->next = $node->next; but if node is head and has no prev, we set head to node->next. That's correct. Similarly for tail.
+
+But in removeNode we also need to handle case where node is both head and tail (single element). Then after removal, head and tail become null. Our code: If node->prev is null => head = node->next; if node->next is null => tail = node->prev. For single element: node->prev null, node->next null => head = null, tail = null. Good.
+
+Now about moveToTail: It calls addToTail after unlinking. That's fine.
+
+Potential bug: In moveToTail we call removeNode($node) which sets node->prev and next to null? Actually removeNode sets node->prev and node->next to null at the end. Then addToTail adds node again. That's okay.
+
+But note: In moveToTail we first unlink node from its current position, then addToTail. However, after removeNode, the node is unlinked but still exists; then addToTail re-links it. Works.
+
+Now about capacity enforcement: After set, we call enforceCapacity($currentTime). But inside enforceCapacity we call removeExpired($currentTime) which uses getClock? Actually removeExpired receives currentTime parameter. That's fine.
+
+Potential issue: In enforceCapacity we call countNonExpired() after removal of expired entries. That's okay.
+
+Now about the case where capacity is exceeded due to new entry and there are no expired entries, we evict LRU. That's correct.
+
+Now about the scenario where TTL is set for an existing key: We update expiry accordingly. Good.
+
+Now about the case where $ttl is null: we set expiry = PHP_INT_MAX. That's fine.
+
+Now about the requirement: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry." Our enforceCapacity does exactly that.
+
+Potential nuance: If after removal of expired entries, we still exceed capacity due to non-expired entries, we evict LRU. That's correct.
+
+Now about the keys method: We only include non-expired entries. That's per spec.
+
+Now about count: Returns number of non-expired entries.
+
+Now about get returning default for missing/expired: We return $default. If default is null and entry exists with null value, we return node->value which is null. That's correct.
+
+Now about has: Should not change recency; we only check expiration.
+
+Now about delete: Returns true if non-expired existed. We treat expired as false.
+
+Now about the custom clock: In getClock we use $this->clock() if not null. Good.
+
+Potential bug: In set, after insertion we call enforceCapacity($currentTime). But inside enforceCapacity we call removeExpired($currentTime) which uses the same currentTime. That's fine.
+
+But note: In removeExpired we iterate over array_keys($this->map) and for each node check expiry <= $currentTime. However, after we remove some nodes, the map changes; but we are iterating over a copy of keys (array_keys returns a copy). So it's safe.
+
+Now about the removal of expired entries in get: We manually remove and return default. That's consistent with spec.
+
+Now about the case where get is called on an expired entry: It removes it and returns default. That's per spec: "an expired entry is removed."
+
+Now about the case where has is called on an expired entry: Returns false (as per spec). Good.
+
+Now about the case where delete is called on an expired entry: Returns false.
+
+Now about the requirement that $ttl <= 0 throws InvalidArgumentException. We check in set for both new and existing entries. Good.
+
+Now about capacity validation: In constructor we throw if <1.
+
+Now about the class name: LruCache, no namespace.
+
+Now about returning the complete file in a single ```php code block.
+
+Thus final code:
+
+<?php
+
+class LruCache implements \Countable {
+    // ... as above
+}
+
+We'll embed everything.
+
+Potential improvements: Use type hints for Node? Not needed.
+
+Now let's write final code.
+
+But before finalizing, let's test mentally with some scenarios.
+
+Test 1: Basic operations.
+
+$cache = new LruCache(2);
+$cache->set('a', 1);
+$cache->set('b', 2);
+assert($cache->count() == 2);
+$cache->set('c', 3); // capacity 2, no TTL
+After set('c'), we should evict LRU (which is 'a') because after insertion size=3 >2. Let's simulate:
+
+- Before set('c'): map has a,b; order: tail b (MRU), head a (LRU).
+- set('c'): new node added at tail => c MRU. Now size=3. enforceCapacity:
+   - removeExpired: none.
+   - countNonExpired = 3 > capacity 2 => evict LRU: head is a. Remove a. Now map has b,c. Count=2. Keys order: LRU->MRU: b (LRU), c (MRU). Good.
+
+Our code: In set, after insertion we call enforceCapacity($currentTime). In enforceCapacity, removeExpired then while countNonExpired > capacity: evict head. That's correct.
+
+Test 2: TTL expiration.
+
+$clock = function() { static $t = 0; return $t++; };
+But we can't easily test due to time. But conceptually, if set('a',1,1.0) at t=0, then get('a') at t=1.5 should be expired and default returned, and entry removed.
+
+Our code: In get, we check expiry <= currentTime => remove and return default. Good.
+
+Test 3: get with missing key returns default.
+
+Works.
+
+Test 4: has after expiration returns false.
+
+Works.
+
+Test 5: delete existing non-expired returns true.
+
+Works.
+
+Now about the removal of expired entries in set: Suppose we have capacity 2, entries: a (expired), b (non-expired). Insert new entry c. After insertion, size=3 >2. First removeExpired: remove a (expired). Now map has b,c (size 2). countNonExpired = 2 <= capacity => no eviction. So final cache has b and c. That's correct.
+
+Now about the case where TTL is set for existing key: Suppose a has TTL 5, we set a with TTL 1. Then expiry changes to current+1. Good.
+
+Now about the case where TTL is null: never expires.
+
+Now about the custom clock: If user passes a Closure that returns float seconds, we use it. Good.
+
+Potential bug: In getClock we use microtime(true) which returns a float with seconds as integer part? Actually microtime(true) returns a float representing seconds with fractional part (microseconds). That's fine.
+
+Now about the removal of expired entries in enforceCapacity: We call removeExpired($currentTime) which uses the same currentTime. However, after we remove some expired entries, there might be new expired entries due to time passing? Not relevant.
+
+Now about the countNonExpired method: It uses getClock() each time. That's okay.
+
+Potential issue: In countNonExpired we iterate over $this->map which may contain expired nodes; but we skip them based on expiry > currentTime. Good.
+
+Now about keys: We also skip expired nodes.
+
+Now about the LRU order after removal of expired entries: The list still contains expired nodes (if not removed). But they are not counted in count/keys. However, they may affect has/get/delete? For has we treat as missing; for delete we treat as false if expired. That's fine.
+
+But what about get: If an entry is expired but still in list, get will remove it and return default. That's good.
+
+Now about the scenario where we have many expired entries and capacity is exceeded due to non-expired ones? Not needed.
+
+Now about the requirement that count() returns number of non-expired entries. We implemented that.
+
+Now about the method signatures: All correct.
+
+Potential improvements: Use proper type hints for Node? Not needed.
+
+Now let's write final code.
+
+But we must ensure that the code doesn't have any syntax errors. Let's compile mentally.
+
+We'll produce:
+
+<?php
+
+class LruCache implements \Countable {
+    private int $capacity;
+    private ?Closure $clock;
+    private ?Node $head = null;
+    private ?Node $tail = null;
+    private array $map = [];
+
+    private class Node {
+        public string $key;
+        public mixed $value;
+        public float $expiry;
+        public ?Node $prev;
+        public ?Node $next;
+
+        public function __construct(string $key, mixed $value, float $expiry) {
+            $this->key = $key;
+            $this->value = $value;
+            $this->expiry = $expiry;
+            $this->prev = null;
+            $this->next = null;
+        }
+    }
+
+    public function __construct(int $capacity, ?Closure $clock = null) {
+        if ($capacity < 1) {
+            throw new \InvalidArgumentException('Capacity must be at least 1');
+        }
+        $this->capacity = $capacity;
+        $this->clock = $clock;
+    }
+
+    private function getClock(): float {
+        return $this->clock !== null ? ($this->clock()) : microtime(true);
+    }
+
+    // LRU list operations
+    private function addToTail(Node $node): void {
+        if ($this->tail === null) {
+            $this->head = $this->tail = $node;
+        } else {
+            $this->tail->next = $node;
+            $node->prev = $this->tail;
+            $node->next = null;
+            $this->tail = $node;
+        }
+    }
+
+    private function moveToTail(Node $node): void {
+        if ($node === $this->tail) {
+            return;
+        }
+        // Unlink node
+        if ($node->prev !== null) {
+            $node->prev->next = $node->next;
+        } else {
+            $this->head = $node->next;
+        }
+        if ($node->next !== null) {
+            $node->next->prev = $node->prev;
+        } else {
+            $this->tail = $node->prev;
+        }
+        // Add to tail
+        $this->addToTail($node);
+    }
+
+    private function removeNode(Node $node): void {
+        if ($node->prev !== null) {
+            $node->prev->next = $node->next;
+        } else {
+            $this->head = $node->next;
+        }
+        if ($node->next !== null) {
+            $node->next->prev = $node->prev;
+        } else {
+            $this->tail = $node->prev;
+        }
+        $node->prev = null;
+        $node->next = null;
+    }
+
+    private function enforceCapacity(float $currentTime): void {
+        // Remove expired entries first
+        $this->removeExpired($currentTime);
+        // If still over capacity, evict LRU
+        while ($this->countNonExpired() > $this->capacity) {
+            if ($this->head === null) {
+                break;
+            }
+            $nodeToRemove = $this->head;
+            $keyToRemove = $nodeToRemove->key;
+            $this->removeNode($nodeToRemove);
+            unset($this->map[$keyToRemove]);
+        }
+    }
+
+    private function removeExpired(float $currentTime): void {
+        foreach (array_keys($this->map) as $key => $node) {
+            if ($node->expiry <= $currentTime) {
+                $this->removeNode($node);
+                unset($this->map[$key]);
+            }
+        }
+    }
+
+    private function countNonExpired(): int {
+        $currentTime = $this->getClock();
+        $count = 0;
+        foreach ($this->map as $node) {
+            if ($node->expiry > $currentTime) {
+                $count++;
+            }
+        }
+        return $count;
+    }
+
+    public function set(string $key, mixed $value, ?float $ttl = null): void {
+        $currentTime = $this->getClock();
+
+        if (isset($this->map[$key])) {
+            $node = &$this->map[$key];
+            $node->value = $value;
+            if ($ttl !== null) {
+                if ($ttl <= 0) {
+                    throw new \InvalidArgumentException('TTL must be greater than zero');
+                }
+                $node->expiry = $currentTime + $ttl;
+            } else {
+                $node->expiry = PHP_INT_MAX;
+            }
+            $this->moveToTail($node);
+        } else {
+            if ($ttl !== null) {
+                if ($ttl <= 0) {
+                    throw new \InvalidArgumentException('TTL must be greater than zero');
+                }
+                $expiry = $currentTime + $ttl;
+            } else {
+                $expiry = PHP_INT_MAX;
+            }
+            $node = new Node($key, $value, $expiry);
+            $this->map[$key] = $node;
+            $this->addToTail($node);
+        }
+
+        // Enforce capacity
+        $this->enforceCapacity($currentTime);
+    }
+
+    public function get(string $key, mixed $default = null): mixed {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return $default;
+        }
+        $node = &$this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            // Expired: remove
+            $this->removeNode($node);
+            unset($this->map[$key]);
+            return $default;
+        }
+        // Not expired: move to MRU
+        $this->moveToTail($node);
+        return $node->value;
+    }
+
+    public function has(string $key): bool {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return false;
+        }
+        $node = $this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            return false;
+        }
+        return true;
+    }
+
+    public function delete(string $key): bool {
+        $currentTime = $this->getClock();
+        if (!isset($this->map[$key])) {
+            return false;
+        }
+        $node = &$this->map[$key];
+        if ($node->expiry <= $currentTime) {
+            // Expired entry: treat as missing
+            return false;
+        }
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        return true;
+    }
+
+    public function count(): int {
+        return $this->countNonExpired();
+    }
+
+    public function keys(): array {
+        $currentTime = $this->getClock();
+        $result = [];
+        $node = $this->head;
+        while ($node !== null) {
+            if ($node->expiry > $currentTime) {
+                $result[] = $node->key;
+            }
+            $node = $node->next;
+        }
+        return $result;
+    }
+}
+
+Now check for any missing semicolons, braces.
+
+All good.
+
+Potential improvements: In set, when key exists and we update TTL, we used $ttl <= 0 check. That's correct.
+
+Now about the requirement that $ttl <= 0 throws InvalidArgumentException. We do that.
+
+Now about the case where $ttl is null: no expiration.
+
+Now about the time reading: All time checks use getClock().
+
+Now about the custom clock: If user passes null, we use microtime(true). Good.
+
+Now about the requirement that the file must not print anything and must not contain test or demo code. We have none.
+
+Thus final answer is ready.
+
+We'll output as a single ```php block.

@@ -1,0 +1,2178 @@
+*   Class name: `LruCache`.
+    *   Implements: `\Countable`.
+    *   PHP Version: 8.4 (use modern features if applicable, though standard OOP is fine).
+    *   No namespace.
+
+        *   `__construct(int $capacity, ?\Closure $clock = null)`:
+            *   `$capacity >= 1`.
+            *   `$clock` returns `float` (seconds). Default: `microtime(true)`.
+        *   `set(string $key, mixed $value, ?float $ttl = null): void`:
+            *   Insert/replace entry.
+            *   Make it Most Recently Used (MRU).
+            *   `$ttl` in seconds. `null` = no expiry.
+            *   `$ttl <= 0` throws `\InvalidArgumentException`.
+            *   If over capacity:
+                1. Remove expired entries.
+                2. If still over capacity, evict LRU.
+        *   `get(string $key, mixed $default = null): mixed`:
+            *   Return value and make MRU.
+            *   If missing or expired, return `$default` and remove expired entry.
+            *   `null` is a valid value.
+        *   `has(string $key): bool`:
+            *   True if exists and not expired.
+            *   Does *not* change recency.
+        *   `delete(string $key): bool`:
+            *   Remove entry.
+            *   Return true if a non-expired entry existed.
+        *   `count(): int`:
+            *   Number of non-expired entries.
+        *   `keys(): array`:
+            *   List of non-expired keys, ordered LRU to MRU.
+
+    *   LRU requires a Doubly Linked List (DLL) for $O(1)$ reordering and an associative array (hash map) for $O(1)$ lookup.
+    *   PHP's `SplDoublyLinkedList` is available, but it's not ideal for $O(1)$ removal of a specific node unless we have a reference to the node.
+    *   A custom DLL node structure is better. Each node will store: `key`, `value`, `expiry` (float or null), `prev`, `next`.
+    *   The hash map will map `string $key` to the `Node` object.
+
+    *   `Node` class (internal or private):
+        *   `string $key`
+        *   `mixed $value`
+        *   `?float $expiry`
+        *   `?Node $prev`
+        *   `?Node $next`
+
+    *   `LruCache` properties:
+        *   `int $capacity`
+        *   `\Closure $clock`
+        *   `array $map` (key -> Node)
+        *   `?Node $head` (LRU)
+        *   `?Node $tail` (MRU)
+
+    *   *Helper: `removeNode(Node $node)`*: Detaches node from DLL.
+    *   *Helper: `moveToTail(Node $node)`*: Moves node to the end (MRU).
+    *   *Helper: `removeNodeFromMap(string $key)`*: Removes from map and DLL.
+    *   *Helper: `isExpired(Node $node, float $now): bool`*: Checks if `expiry` is set and `now >= expiry`.
+    *   *Helper: `cleanupExpired()`*: Iterates through the list and removes expired nodes. *Wait*, the prompt says "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry." This implies we don't necessarily clean *all* expired entries on every `set`, just enough to satisfy capacity or specifically when capacity is exceeded. However, `get`, `has`, `count`, and `keys` also need to respect expiry.
+
+    *   *Refined `set` logic*:
+        1.  If key exists, update value/expiry and move to tail.
+        2.  If key doesn't exist:
+            a. Create new node.
+            b. Add to tail.
+            c. Add to map.
+            d. If `count($map) > $capacity`:
+                i. Iterate through the list (from head/LRU) and remove expired entries.
+                ii. If `count($map) > $capacity`, remove the head (LRU).
+
+    *   *Wait*, the prompt says: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   This means:
+        1. Add/Update the item.
+        2. Check if `count($map) > $capacity`.
+        3. If yes:
+           - Iterate through the list (from head to tail) and remove all expired nodes.
+           - If `count($map)` is *still* `> $capacity`, remove the head (the LRU node).
+
+    *   *Wait*, `count()` and `keys()` must return *non-expired* entries. This means `count()` isn't just `count($this->map)`. It's the number of valid entries.
+
+    *   `get(key)`:
+        1. Check map.
+        2. If not found, return `$default`.
+        3. If found:
+           a. Check expiry.
+           b. If expired, `delete(key)`, return `$default`.
+           c. If not expired, `moveToTail(node)`, return `node->value`.
+
+    *   `has(key)`:
+        1. Check map.
+        2. If not found, return `false`.
+        3. If found:
+           a. Check expiry.
+           b. If expired, return `false` (Note: prompt says "Does NOT change recency", but `get` removes expired entries. `has` should probably not remove it to stay strictly "does not change recency", but the prompt says "true if the entry exists and is not expired". If it's expired, it's effectively gone for the user. Let's check: "A missing or expired entry returns $default (an expired entry is removed)" applies to `get`. For `has`, it just returns `bool`. For `delete`, it returns `bool` if a non-expired entry existed.
+
+    *   `delete(key)`:
+        1. Check map.
+        2. If not found, return `false`.
+        3. If found:
+           a. Check expiry.
+           b. If expired, return `false`.
+           c. If not expired, remove from map and DLL, return `true`.
+
+    *   `count()`:
+        1. Iterate through the map/list and count non-expired.
+
+    *   `keys()`:
+        1. Iterate through the list (head to tail) and collect non-expired keys.
+
+    *   *Self-Correction on `set` and `capacity`*:
+        If I add an item and it goes over capacity, I must clean up.
+        Example: Capacity 2. Map has A, B.
+        `set(C)`:
+        1. Map has A, B, C.
+        2. `count($map) = 3 > 2`.
+        3. Check A (LRU). If A is expired, remove A.
+        4. Check B. If B is expired, remove B.
+        5. Check C. If C is expired, remove C.
+        6. If `count($map)` is still `> 2`, remove head.
+
+    *   *Wait*, if I remove expired entries during `set`, I might remove the very entry I just added if its TTL was 0 (but TTL > 0 is enforced). Or I might remove the entry I just updated.
+    *   The prompt says: "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   This implies the order:
+        1. Perform the `set` (insert/replace).
+        2. If `count($map) > $capacity`:
+           a. Traverse from head to tail.
+           b. If node is expired, remove it.
+           c. If `count($map) <= $capacity`, stop.
+           d. If after checking all nodes, `count($map) > $capacity`, remove the head.
+
+    *   *Wait*, if I remove expired entries, I should probably do it in a way that doesn't break the loop.
+
+    *   *Complexity Check*:
+        `get`, `set`, `has`, `delete` are $O(1)$ average.
+        `set` might trigger a cleanup. If many entries are expired, it's $O(N)$. But the prompt says "apart from removing expired entries", so $O(1)$ is acceptable for the logic.
+        `count` and `keys` are $O(N)$.
+
+    *   `Node` class:
+        ```php
+        private class Node {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiry,
+                public ?Node $prev = null,
+                public ?Node $next = null,
+            ) {}
+        }
+        ```
+
+    *   `LruCache` properties:
+        ```php
+        private int $capacity;
+        private \Closure $clock;
+        /** @var array<string, Node> */
+        private array $map = [];
+        private ?Node $head = null;
+        private ?Node $tail = null;
+        ```
+
+    *   `set` implementation detail:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be positive");
+            }
+
+            $now = ($this->clock)();
+            $expiry = ($ttl !== null) ? ($now + $ttl) : null;
+
+            if (isset($this->map[$key])) {
+                $node = $this->map[$key];
+                $node->value = $value;
+                $node->expiry = $expiry;
+                $this->moveToTail($node);
+            } else {
+                $node = new Node($key, $value, $expiry);
+                $this->map[$key] = $node;
+                $this->addToTail($node);
+            }
+
+            if (count($this->map) > $this->capacity) {
+                // 1. Remove expired
+                $curr = $this->head;
+                while ($curr !== null) {
+                    $next = $curr->next;
+                    if ($curr->expiry !== null && $now >= $curr->expiry) {
+                        $this->removeNode($curr);
+                        unset($this->map[$curr->key]);
+                    }
+                    $curr = $next;
+                }
+
+                // 2. If still over, evict LRU
+                if (count($this->map) > $this->capacity) {
+                    if ($this->head !== null) {
+                        $lru = $this->head;
+                        $this->removeNode($lru);
+                        unset($this->map[$lru->key]);
+                    }
+                }
+            }
+        }
+        ```
+
+    *   *Wait*, the `set` logic for removing expired entries: "If the cache now holds more than `$capacity` entries, first remove expired entries".
+    *   If I remove expired entries, I must be careful not to remove the node I just added if it's expired (though TTL > 0 prevents that).
+    *   Also, if I remove an expired node, I must `unset` it from the `$map`.
+
+    *   *Refining `get`*:
+        ```php
+        public function get(string $key, mixed $default = null): mixed {
+            if (!isset($this->map[$key])) {
+                return $default;
+            }
+
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+
+            if ($node->expiry !== null && $now >= $node->expiry) {
+                $this->deleteInternal($node); // Helper to remove from map and DLL
+                return $default;
+            }
+
+            $this->moveToTail($node);
+            return $node->value;
+        }
+        ```
+
+    *   *Refining `has`*:
+        ```php
+        public function has(string $key): bool {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiry !== null && $now >= $node->expiry) {
+                return false;
+            }
+            return true;
+        }
+        ```
+
+    *   *Refining `delete`*:
+        ```php
+        public function delete(string $key): bool {
+            if (!isset($this->map[$key])) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiry !== null && $now >= $node->expiry) {
+                // The prompt says: "returns true if a non-expired entry existed"
+                // If it's expired, it's not a "non-expired entry".
+                // Should we remove it? The prompt says "removes the entry".
+                // Let's remove it anyway to keep the cache clean, but return false.
+                $this->deleteInternal($node);
+                return false;
+            }
+            $this->deleteInternal($node);
+            return true;
+        }
+        ```
+
+    *   *Refining `count`*:
+        ```php
+        public function count(): int {
+            $count = 0;
+            $now = ($this->clock)();
+            foreach ($this->map as $node) {
+                if ($node->expiry === null || $now < $node->expiry) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+
+    *   *Refining `keys`*:
+        ```php
+        public function keys(): array {
+            $keys = [];
+            $now = ($this->clock)();
+            $curr = $this->head;
+            while ($curr !== null) {
+                if ($curr->expiry === null || $now < $curr->expiry) {
+                    $keys[] = $curr->key;
+                }
+                $curr = $curr->next;
+            }
+            return $keys;
+        }
+        ```
+
+    *   `capacity` must be `>= 1`.
+    *   `$ttl <= 0` throws `\InvalidArgumentException`.
+    *   `get` returns `$default` for missing/expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` does not change recency.
+    *   `keys` ordered LRU to MRU.
+    *   `count` is number of non-expired entries.
+    *   `set` logic: replace entry/TTL, move to MRU, handle capacity.
+
+    *   *Wait*, in `set`, if I replace an entry, I should update its TTL. My code does `node->expiry = $expiry`. This is correct.
+
+    *   *Wait*, in `delete(key)`, if the entry is expired, should I remove it?
+        The prompt says: "`delete(string $key): bool` — removes the entry; returns true if a non-expired entry existed."
+        If it's expired, it's still an entry in the map. Removing it makes sense.
+
+    *   *Wait*, in `get(key)`, if it's expired, it's removed.
+        "A missing or expired entry returns `$default` (an expired entry is removed)."
+
+    *   *Wait*, in `has(key)`, if it's expired, it returns `false`. Does it remove it?
+        "true if the entry exists and is not expired. Does NOT change recency."
+        It doesn't explicitly say to remove it. I'll leave it in the map to avoid side effects in `has`, as `get` and `delete` are the ones that explicitly mention removal.
+
+    *   *Wait*, the `set` capacity logic:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        My implementation:
+        ```php
+        if (count($this->map) > $this->capacity) {
+            // 1. Remove expired
+            $curr = $this->head;
+            while ($curr !== null) {
+                $next = $curr->next;
+                if ($curr->expiry !== null && $now >= $curr->expiry) {
+                    $this->deleteInternal($curr);
+                    unset($this->map[$curr->key]);
+                }
+                $curr = $next;
+            }
+            // 2. If still over, evict LRU
+            if (count($this->map) > $this->capacity) {
+                if ($this->head !== null) {
+                    $lru = $this->head;
+                    $this->deleteInternal($lru);
+                    unset($this->map[$lru->key]);
+                }
+            }
+        }
+        ```
+        This looks solid.
+
+    *   *One detail*: `deleteInternal` vs `removeNode`.
+        `removeNode` handles the DLL pointers.
+        `deleteInternal` handles the DLL pointers AND `unset($this->map[$key])`.
+        I'll use `removeNode` for the DLL part and `unset` for the map part.
+
+    *   *Wait*, `count()` and `keys()`:
+        `count()`: "number of non-expired entries".
+        `keys()`: "list of non-expired keys, ordered from least recently used to most recently used".
+        My implementation:
+        `count()`: iterates map.
+        `keys()`: iterates DLL from head to tail.
+        Both are $O(N)$.
+
+    *   *Wait*, `set` capacity logic again:
+        If I add an entry that is *already* expired (not possible since TTL > 0), or if the capacity is 1 and I add a new item, the logic should work.
+        If capacity is 1, and I have A. I `set(B)`.
+        Map has A, B. `count` is 2.
+        1. Check A. If A is expired, remove A.
+        2. If A is not expired, `count` is still 2.
+        3. Remove head (A).
+        Result: Map has B. Correct.
+
+    *   *Edge case*: `set` an existing key.
+        If I `set('A', 1)` then `set('A', 2)`, the count doesn't increase. The `if (count($this->map) > $this->capacity)` won't trigger. Correct.
+
+    *   *Edge case*: `capacity` is 1.
+        `set('A', 1)` -> map: {A}.
+        `set('B', 2)` -> map: {A, B}. `count` is 2.
+        If A is expired, remove A. Map: {B}. `count` is 1.
+        If A is not expired, remove head (A). Map: {B}. `count` is 1.
+        Correct.
+
+    *   *Edge case*: `ttl` is `null`.
+        `expiry` is `null`.
+        `isExpired` check: `if ($node->expiry !== null && $now >= $node->expiry)`.
+        If `expiry` is `null`, it's never expired. Correct.
+
+    *   *Edge case*: `get` returns `null`.
+        `$default` is `null`.
+        `if (!isset($this->map[$key]))` will return `null`.
+        If key exists and value is `null`:
+        `$node->value` is `null`.
+        `return $node->value` returns `null`.
+        Correct.
+
+    *   *Wait*, `isset($this->map[$key])` returns `false` if the value is `null`?
+        No, `isset` on an array returns `false` if the key doesn't exist OR if the value is `null`.
+        **CRITICAL ERROR**: I must use `array_key_exists($key, $this->map)` instead of `isset($this->map[$key])` because `null` is a valid value.
+
+    *   *Correcting `isset` usage*:
+        - `if (!array_key_exists($key, $this->map))`
+        - `if (array_key_exists($key, $this->map))`
+
+    *   *Wait*, `count()`:
+        The prompt says `count()` is the number of non-expired entries.
+        My `count()` iterates the map and checks expiry. This is $O(N)$. Correct.
+
+    *   *Wait*, `keys()`:
+        The prompt says `keys()` is the list of non-expired keys, ordered LRU to MRU.
+        My `keys()` iterates the DLL from head to tail. This is $O(N)$. Correct.
+
+    *   *Wait*, `set` capacity logic:
+        If I use `array_key_exists` in `set`, it's fine.
+
+    *   *Wait*, `get` logic:
+        ```php
+        if (!array_key_exists($key, $this->map)) {
+            return $default;
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `delete` logic:
+        ```php
+        if (!array_key_exists($key, $this->map)) {
+            return false;
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `has` logic:
+        ```php
+        if (!array_key_exists($key, $this->map)) {
+            return false;
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `set` logic:
+        ```php
+        if (array_key_exists($key, $this->map)) {
+            // ...
+        } else {
+            // ...
+        }
+        ```
+        This is correct.
+
+    *   `capacity` >= 1: `if ($capacity < 1) throw new \InvalidArgumentException();`
+    *   `ttl` <= 0: `if ($ttl !== null && $ttl <= 0) throw new \InvalidArgumentException();`
+    *   `clock` returns `float`.
+    *   `get` returns `$default` for expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` does not change recency.
+    *   `delete` returns `true` if non-expired existed.
+    *   `count` is non-expired.
+    *   `keys` is non-expired, LRU to MRU.
+
+    *   *Wait*, one more check on `set` capacity logic:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        My code:
+        ```php
+        if (count($this->map) > $this->capacity) {
+            $curr = $this->head;
+            while ($curr !== null) {
+                $next = $curr->next;
+                if ($curr->expiry !== null && $now >= $curr->expiry) {
+                    $this->removeNode($curr);
+                    unset($this->map[$curr->key]);
+                }
+                $curr = $next;
+            }
+            if (count($this->map) > $this->capacity) {
+                $lru = $this->head;
+                if ($lru !== null) {
+                    $this->removeNode($lru);
+                    unset($this->map[$lru->key]);
+                }
+            }
+        }
+        ```
+        This looks exactly as requested.
+
+    *   *Wait*, `removeNode` logic:
+        ```php
+        private function removeNode(Node $node): void {
+            if ($node->prev !== null) {
+                $node->prev->next = $node->next;
+            } else {
+                $this->head = $node->next;
+            }
+            if ($node->next !== null) {
+                $node->next->prev = $node->prev;
+            } else {
+                $this->tail = $node->prev;
+            }
+            $node->next = null;
+            $node->prev = null;
+        }
+        ```
+        This is standard DLL removal.
+
+    *   *Wait*, `addToTail` logic:
+        ```php
+        private function addToTail(Node $node): void {
+            if ($this->tail === null) {
+                $this->head = $node;
+                $this->tail = $node;
+            } else {
+                $node->prev = $this->tail;
+                $this->tail->next = $node;
+                $this->tail = $node;
+            }
+        }
+        ```
+        This is standard DLL addition.
+
+    *   *Wait*, `moveToTail` logic:
+        ```php
+        private function moveToTail(Node $node): void {
+            if ($node === $this->tail) {
+                return;
+            }
+            $this->removeNode($node);
+            $this->addToTail($node);
+        }
+        ```
+        This is standard.
+
+    *   *Wait*, `delete` logic:
+        "removes the entry; returns true if a non-expired entry existed."
+        If the entry is expired, I should still remove it from the map and DLL to keep the cache clean, but return `false`.
+        ```php
+        public function delete(string $key): bool {
+            if (!array_key_exists($key, $this->map)) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            $expired = ($node->expiry !== null && $now >= $node->expiry);
+            
+            $this->removeNode($node);
+            unset($this->map[$key]);
+            
+            return !$expired;
+        }
+        ```
+        This matches the requirement.
+
+    *   *Wait*, `get` logic:
+        "A missing or expired entry returns `$default` (an expired entry is removed)."
+        ```php
+        public function get(string $key, mixed $default = null): mixed {
+            if (!array_key_exists($key, $this->map)) {
+                return $default;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiry !== null && $now >= $node->expiry) {
+                $this->removeNode($node);
+                unset($this->map[$key]);
+                return $default;
+            }
+            $this->moveToTail($node);
+            return $node->value;
+        }
+        ```
+        This matches.
+
+    *   *Wait*, `has` logic:
+        "true if the entry exists and is not expired. Does NOT change recency."
+        ```php
+        public function has(string $key): bool {
+            if (!array_key_exists($key, $this->map)) {
+                return false;
+            }
+            $node = $this->map[$key];
+            $now = ($this->clock)();
+            if ($node->expiry !== null && $now >= $node->expiry) {
+                return false;
+            }
+            return true;
+        }
+        ```
+        This matches.
+
+    *   *Wait*, `count` and `keys` logic:
+        `count` and `keys` must return *non-expired* entries.
+        My `count` and `keys` implementations do this.
+
+    *   *Wait*, one small detail in `set`:
+        If I replace an entry, I update its value and its expiry.
+        If the entry was already in the map, I don't add a new node, I just update the existing one.
+        The `count($this->map)` will not increase.
+        If I add a new entry, `count($this->map)` increases.
+        Then I check `if (count($this->map) > $this->capacity)`.
+        This is correct.
+
+    *   *Wait*, `set` capacity cleanup:
+        The prompt says "first remove expired entries; if still over capacity, evict the least recently used entry."
+        My loop:
+        ```php
+        $curr = $this->head;
+        while ($curr !== null) {
+            $next = $curr->next;
+            if ($curr->expiry !== null && $now >= $curr->expiry) {
+                $this->removeNode($curr);
+                unset($this->map[$curr->key]);
+            }
+            $curr = $next;
+        }
+        ```
+        This loop correctly traverses the list and removes expired nodes.
+
+    *   *Wait*, what if `capacity` is 1 and I `set` a new key?
+        `map` has 1 item. `set` new item. `map` has 2 items.
+        `count($this->map) > 1` is true.
+        1. Remove expired.
+        2. If `count` still > 1, remove head.
+        This is correct.
+
+    *   *Wait*, what if `capacity` is 1 and I `set` an existing key?
+        `map` has 1 item. `set` existing key. `map` has 1 item.
+        `count($this->map) > 1` is false.
+        Correct.
+
+    *   *Wait*, `keys()` order:
+        "ordered from least recently used to most recently used".
+        My `keys()` iterates from `head` to `tail`.
+        `head` is the LRU, `tail` is the MRU.
+        So `head -> tail` is LRU to MRU. Correct.
+
+    *   *Wait*, `count()`:
+        "number of non-expired entries".
+        My `count()` iterates the map and checks expiry. Correct.
+
+    *   *Wait*, `set` TTL:
+        "A `$ttl` <= 0 throws `\InvalidArgumentException`."
+        My code: `if ($ttl !== null && $ttl <= 0)`. Correct.
+
+    *   *Wait*, `capacity` check:
+        "`$capacity` must be >= 1, otherwise throw `\InvalidArgumentException`."
+        My code: `if ($capacity < 1)`. Correct.
+
+    *   *Wait*, `clock` default:
+        "`$clock` returns the current time in seconds as a float; when null, use `microtime(true)`."
+        My code: `$this->clock = $clock ?? fn() => microtime(true);`. Correct.
+
+    *   *Wait*, `get` return value:
+        "Note that `null` is a valid stored value and must be returned as `null`, not as `$default`."
+        My code: `return $node->value;` where `$node->value` could be `null`. Correct.
+
+    *   *Wait*, `delete` return value:
+        "returns true if a non-expired entry existed."
+        My code: `return !$expired;`. Correct.
+
+    *   *Wait*, `keys` return type:
+        "list of non-expired keys, ordered from least recently used to most recently used. Keys must be returned exactly as given (as strings)."
+        My code: `array` of strings. Correct.
+
+    *   *Wait*, `set` capacity logic - "remove expired entries":
+        Should I remove *all* expired entries or just enough to get under capacity?
+        The prompt says: "first remove expired entries; if still over capacity, evict the least recently used entry."
+        This implies removing *all* expired entries. My code does this.
+
+    *   *Wait*, `set` capacity logic - "if still over capacity, evict the least recently used entry":
+        My code: `if (count($this->map) > $this->capacity) { $lru = $this->head; ... }`.
+        This is correct.
+
+    *   *Wait*, `set` logic - "If the cache now holds more than `$capacity` entries":
+        If I replace an entry, `count($this->map)` doesn't change.
+        If I add a new entry, `count($this->map)` increases by 1.
+        If the new count is `> capacity`, I perform the cleanup. Correct.
+
+    *   *Wait*, `removeNode` and `unset`:
+        In `set` cleanup:
+        ```php
+        $this->removeNode($curr);
+        unset($this->map[$curr->key]);
+        ```
+        This is correct.
+
+    *   *Wait*, `get` and `delete` removal:
+        In `get`:
+        ```php
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        ```
+        In `delete`:
+        ```php
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        ```
+        This is correct.
+
+    *   *Wait*, `has` doesn't remove. Correct.
+
+    *   *Wait*, `count` and `keys` complexity:
+        `count` is $O(N)$ because it checks expiry for every entry.
+        `keys` is $O(N)$ because it iterates the DLL.
+        The prompt says: "`count` and `keys` may be O(n)". Correct.
+
+    *   *Wait*, `set` complexity:
+        `set` is $O(1)$ average, but the cleanup is $O(N)$.
+        The prompt says: "`get`, `set`, `has` and `delete` should be O(1) on average (apart from removing expired entries)". Correct.
+
+    *   *Wait*, `microtime(true)` returns a float. Correct.
+
+    *   *Wait*, `Node` visibility:
+        `Node` should be a private class or a nested-like structure. In PHP, I'll define it as a private class within the same file (though PHP doesn't have nested classes, I'll just define it at the top level or as a private property if I used an anonymous class, but a standard class is cleaner). Since the prompt says "a class `LruCache`", I'll define `Node` as a helper class in the same file.
+
+    *   *Wait*, `Node` properties:
+        `public string $key;`
+        `public mixed $value;`
+        `public ?float $expiry;`
+        `public ?Node $prev;`
+        `public ?Node $next;`
+
+    *   *Wait*, `LruCache` properties:
+        `private int $capacity;`
+        `private \Closure $clock;`
+        `private array $map = [];`
+        `private ?Node $head = null;`
+        `private ?Node $tail = null;`
+
+    *   *Wait*, `set` logic - "Replacing an entry also replaces its TTL":
+        My code: `$node->expiry = $expiry;`. Correct.
+
+    *   *Wait*, `set` logic - "makes it the most recently used":
+        My code: `$this->moveToTail($node);`. Correct.
+
+    *   *Wait*, `get` logic - "makes the entry the most recently used":
+        My code: `$this->moveToTail($node);`. Correct.
+
+    *   *Wait*, `has` logic - "Does NOT change recency":
+        My code: Does not call `moveToTail`. Correct.
+
+    *   *Wait*, `delete` logic - "removes the entry":
+        My code: `removeNode` and `unset`. Correct.
+
+    *   *Wait*, `count` logic - "number of non-expired entries":
+        My code: iterates and checks `expiry`. Correct.
+
+    *   *Wait*, `keys` logic - "ordered from least recently used to most recently used":
+        My code: `head` to `tail`. Correct.
+
+    *   *Wait*, `keys` logic - "non-expired keys":
+        My code: checks `expiry`. Correct.
+
+    *   *Wait*, `set` capacity logic - "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        If I have capacity 2, and I have A (expired), B (not expired).
+        I `set(C)`.
+        Map: A, B, C. `count` is 3.
+        1. Remove expired: A is removed. Map: B, C.
+        2. `count` is 2. 2 is not > 2.
+        3. Stop.
+        Result: B, C. Correct.
+
+        If I have capacity 2, and I have A (not expired), B (not expired).
+        I `set(C)`.
+        Map: A, B, C. `count` is 3.
+        1. Remove expired: None.
+        2. `count` is 3. 3 > 2.
+        3. Remove head (A). Map: B, C.
+        Result: B, C. Correct.
+
+    *   *Wait*, `set` logic - "If the cache now holds more than `$capacity` entries":
+        If I replace an existing key, the count doesn't increase.
+        If I add a new key, the count increases.
+        The condition `count($this->map) > $this->capacity` is only possible if I added a new key.
+
+    *   *Wait*, `set` logic - "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        What if the *newly added* entry is the one that's expired?
+        The prompt says `$ttl` must be `> 0`. So `t + ttl` will always be `> t`.
+        Since `now` is `t` at the moment of `set`, `now < expiry` is always true.
+        So the new entry will never be expired immediately.
+
+    *   *Wait*, what if `capacity` is 1 and I `set` a new key?
+        Map: {A}. `set(B)`.
+        Map: {A, B}. `count` is 2.
+        1. Remove expired.
+        2. If `count` still > 1, remove head.
+        This works.
+
+    *   *Wait*, `count()` and `keys()`:
+        The prompt says `count()` is "number of non-expired entries".
+        If I have 10 entries and 5 are expired, `count()` should return 5.
+        My code does this.
+
+    *   *Wait*, `keys()`:
+        If I have 10 entries and 5 are expired, `keys()` should return 5 keys.
+        My code does this.
+
+    *   *Wait*, `get()`:
+        "A missing or expired entry returns `$default` (an expired entry is removed)."
+        My code:
+        ```php
+        if ($node->expiry !== null && $now >= $node->expiry) {
+            $this->removeNode($node);
+            unset($this->map[$key]);
+            return $default;
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `delete()`:
+        "removes the entry; returns true if a non-expired entry existed."
+        My code:
+        ```php
+        $expired = ($node->expiry !== null && $now >= $node->expiry);
+        $this->removeNode($node);
+        unset($this->map[$key]);
+        return !$expired;
+        ```
+        This is correct.
+
+    *   *Wait*, `has()`:
+        "true if the entry exists and is not expired. Does NOT change recency."
+        My code:
+        ```php
+        if ($node->expiry !== null && $now >= $node->expiry) {
+            return false;
+        }
+        return true;
+        ```
+        This is correct.
+
+    *   *Wait*, `set()`:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        My code:
+        ```php
+        if (count($this->map) > $this->capacity) {
+            $curr = $this->head;
+            while ($curr !== null) {
+                $next = $curr->next;
+                if ($curr->expiry !== null && $now >= $curr->expiry) {
+                    $this->removeNode($curr);
+                    unset($this->map[$curr->key]);
+                }
+                $curr = $next;
+            }
+            if (count($this->map) > $this->capacity) {
+                $lru = $this->head;
+                if ($lru !== null) {
+                    $this->removeNode($lru);
+                    unset($this->map[$lru->key]);
+                }
+            }
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `set()`:
+        "Replacing an entry also replaces its TTL."
+        My code:
+        ```php
+        if (array_key_exists($key, $this->map)) {
+            $node = $this->map[$key];
+            $node->value = $value;
+            $node->expiry = $expiry;
+            $this->moveToTail($node);
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `set()`:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        Is it possible that `count($this->map)` is already `> capacity` before the `set`?
+        No, because `set` maintains the capacity.
+        Wait, `count()` returns the number of *non-expired* entries.
+        `count($this->map)` returns the number of *all* entries in the map.
+        The capacity constraint is on the number of entries in the cache.
+        If the cache has 10 entries, and 5 are expired, `count()` is 5.
+        But `count($this->map)` is 10.
+        The capacity constraint should be on the total number of entries stored in the map.
+        "If the cache now holds more than `$capacity` entries..."
+        This refers to the internal storage.
+        So `count($this->map)` is the correct way to check capacity.
+
+    *   *Wait*, `count()`:
+        "number of non-expired entries".
+        This is a different `count` than the internal map size.
+        `count()` (the method) returns the number of *valid* entries.
+        `count($this->map)` (the internal check) returns the number of *all* entries.
+        This is correct.
+
+    *   *Wait*, `keys()`:
+        "list of non-expired keys, ordered from least recently used to most recently used."
+        My code:
+        ```php
+        $curr = $this->head;
+        while ($curr !== null) {
+            if ($curr->expiry === null || $now < $curr->expiry) {
+                $keys[] = $curr->key;
+            }
+            $curr = $curr->next;
+        }
+        ```
+        This is correct.
+
+    *   *Wait*, `set` capacity logic (one more time):
+        If `capacity` is 2.
+        Map: {A: exp, B: valid}.
+        `count($this->map)` is 2.
+        `count()` is 1.
+        `set(C)`:
+        Map: {A: exp, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. Map: {B, C}. `count` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set` capacity logic (another one):
+        If `capacity` is 2.
+        Map: {A: valid, B: valid}.
+        `count($this->map)` is 2.
+        `set(C)`:
+        Map: {A: valid, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: None.
+        2. `count` is 3. 3 > 2.
+        3. Remove head (A).
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set` logic:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        If I have capacity 2, and I have A (valid), B (valid).
+        I `set(A, new_value)`.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        No cleanup.
+        Result: {A: new_value, B: valid}.
+        Wait, A was the LRU, now it's the MRU.
+        The order should be B, A.
+        My `moveToTail` handles this. Correct.
+
+    *   *Wait*, `set` logic:
+        If I have capacity 2, and I have A (valid), B (valid).
+        I `set(C, val)`.
+        Map: {A, B, C}.
+        `count` is 3.
+        1. Remove expired: None.
+        2. `count` is 3. 3 > 2.
+        3. Remove head (A).
+        Result: {B, C}.
+        Correct.
+
+    *   *Wait*, `set` logic:
+        If I have capacity 2, and I have A (expired), B (valid).
+        I `set(C, val)`.
+        Map: {A, B, C}.
+        `count` is 3.
+        1. Remove expired: A is removed.
+        2. `count` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        Correct.
+
+    *   *Wait*, `set` logic:
+        If I have capacity 2, and I have A (expired), B (expired).
+        I `set(C, val)`.
+        Map: {A, B, C}.
+        `count` is 3.
+        1. Remove expired: A and B are removed.
+        2. `count` is 1.
+        3. 1 is not > 2.
+        Result: {C}.
+        Correct.
+
+    *   *Wait*, `set` logic:
+        If I have capacity 2, and I have A (expired), B (valid).
+        I `set(B, new_val)`.
+        Map: {A, B}.
+        `count` is 2.
+        2 is not > 2.
+        No cleanup.
+        Result: {A, B}. (A is still in the map, but it's expired).
+        Wait, if I `set` an existing key, the count doesn't increase.
+        So `count($this->map) > $this->capacity` will only be true if I added a *new* key.
+        This is correct.
+
+    *   *Wait*, `set` logic:
+        If I have capacity 2, and I have A (expired), B (valid).
+        I `set(B, new_val)`.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        No cleanup.
+        Result: {A, B}. (A is still in the map, but it's expired).
+        This is fine, because `get`, `has`, `delete`, `count`, and `keys` all handle expired entries. The only place where expired entries might linger is in the map until a `set` triggers a cleanup or they are specifically accessed. This is acceptable and follows the instructions.
+
+    *   *Wait*, `set` logic:
+        "If the cache now holds more than `$capacity` entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        This instruction is only triggered when `count($this->map) > $capacity`.
+        This means the cache *can* contain expired entries as long as the total number of entries (including expired ones) is `<= capacity`.
+
+    *   *Wait*, `count()`:
+        "number of non-expired entries".
+        If the map has {A: expired, B: valid}, `count()` returns 1.
+        This is correct.
+
+    *   *Wait*, `keys()`:
+        If the map has {A: expired, B: valid}, `keys()` returns `['B']`.
+        This is correct.
+
+    *   *Wait*, `has()`:
+        If the map has {A: expired, B: valid}, `has('A')` returns `false`.
+        This is correct.
+
+    *   *Wait*, `delete()`:
+        If the map has {A: expired, B: valid}, `delete('A')` returns `false`.
+        This is correct.
+
+    *   *Wait*, `get()`:
+        If the map has {A: expired, B: valid}, `get('A')` returns `$default` and removes A.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: valid, B: valid}, `set('C', val)`:
+        Map: {A: valid, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: None.
+        2. `count($this->map)` is 3.
+        3. 3 > 2.
+        4. Remove head (A).
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: valid, B: valid}, `set('A', new_val)`:
+        Map: {A: valid, B: valid}.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        Result: {B, A}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('A', new_val)`:
+        Map: {A: valid, B: valid}.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        Result: {B, A}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('B', new_val)`:
+        Map: {A: expired, B: valid}.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        Result: {A, B}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('B', new_val)`:
+        Map: {A: expired, B: valid}.
+        `count($this->map)` is 2.
+        2 is not > 2.
+        Result: {A, B}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `set()`:
+        If the map has {A: expired, B: valid}, `set('C', val)`:
+        Map: {A: expired, B: valid, C: valid}.
+        `count($this->map)` is 3.
+        3 > 2.
+        1. Remove expired: A is removed.
+        2. `count($this->map)` is 2.
+        3. 2 is not > 2.
+        Result: {B, C}.
+        This is correct.
+
+    *   *Wait*, `

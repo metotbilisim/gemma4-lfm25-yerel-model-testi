@@ -1,0 +1,880 @@
+*   Class name: `LruCache`.
+    *   Implements: `\Countable`.
+    *   PHP Version: 8.4.
+    *   Features: LRU (Least Recently Used) eviction, optional per-entry TTL (Time-To-Live).
+    *   API requirements:
+        *   `__construct(int $capacity, ?\Closure $clock = null)`: $capacity >= 1.
+        *   `set(string $key, mixed $value, ?float $ttl = null): void`: Update recency, handle TTL, handle capacity (remove expired first, then LRU).
+        *   `get(string $key, mixed $default = null): mixed`: Update recency, handle expiration.
+        *   `has(string $key): bool`: Check existence/expiration, no recency change.
+        *   `delete(string $key): bool`: Remove entry.
+        *   `count(): int`: Count non-expired.
+        *   `keys(): array`: Return non-expired keys, LRU order (least to most recent).
+    *   Complexity: `get`, `set`, `has`, `delete` should be $O(1)$ average. `count`, `keys` can be $O(n)$.
+    *   Constraints: No namespace, no printing, no test code, single code block.
+
+    *   To achieve $O(1)$ for `get`, `set`, `has`, and `delete`, we need a combination of a Hash Map (for $O(1)$ lookup) and a Doubly Linked List (for $O(1)$ reordering/eviction).
+    *   PHP's associative arrays are actually ordered maps (hash tables with internal order), which makes implementing an LRU cache very easy. In PHP, when you `unset` a key and re-insert it, it goes to the end of the internal order.
+    *   However, we need to handle TTL.
+    *   Let's define an internal structure for an entry:
+        ```php
+        class Entry {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiry = null
+            ) {}
+        }
+        ```
+    *   Wait, if I use a standard PHP associative array, `unset` and re-assignment handles the "recency" order.
+    *   `$this->data[$key] = $entry` moves it to the end (most recent).
+    *   `$this->data[$key] = $new_entry` replaces it and moves it to the end.
+    *   `unset($this->data[$key])` removes it.
+    *   The order in a PHP array is insertion order. To make something "most recent", we `unset` then `set`.
+
+    *   `$capacity`: int.
+    *   `$clock`: Closure.
+    *   `$data`: array (key => Entry object).
+
+    *   `__construct`: Validate capacity. Store clock.
+    *   `set`:
+        1.  Check if key exists. If so, `unset`.
+        2.  Calculate expiry: `now + ttl` if ttl provided, else `null`.
+        3.  Create entry.
+        4.  `$this->data[$key] = $entry`.
+        5.  Check capacity:
+            *   First, iterate and remove expired entries? The prompt says: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+            *   Wait, "remove expired entries" implies we might need to scan. But scanning is $O(n)$. The prompt says `set` should be $O(1)$ *on average (apart from removing expired entries)*. This implies we can afford a scan for expired entries during a `set` if we are over capacity.
+            *   Actually, let's look at the requirement: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+            *   If I scan all entries to remove expired ones, it's $O(n)$.
+            *   Is there a way to do it faster? Usually, a priority queue (min-heap) of expiry times allows $O(1)$ or $O(\log n)$ access to the next expiring item. But the prompt says $O(1)$ average *apart from removing expired entries*.
+            *   Let's stick to the requirement: If `count($this->data) > $this->capacity`, scan for expired, then if still over, remove the first element in the array (which is the LRU in PHP).
+
+    *   `get`:
+        1.  Check if key exists.
+        2.  If exists, check expiry.
+        3.  If expired, `unset` and return `$default`.
+        4.  If valid, `unset` and re-insert (to update recency) and return value.
+
+    *   `has`:
+        1.  Check if key exists.
+        2.  If exists, check expiry.
+        3.  If expired, `unset` and return `false`.
+        4.  Else return `true`.
+
+    *   `delete`:
+        1.  Check if key exists.
+        2.  If exists, check expiry.
+        3.  If expired, `unset` and return `false`.
+        4.  Else `unset` and return `true`.
+
+    *   `count`:
+        1.  Iterate and count non-expired.
+
+    *   `keys`:
+        1.  Iterate and collect non-expired keys. Since PHP arrays maintain insertion order, the order will be LRU to MRU.
+
+    *   `set` logic:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be positive");
+            }
+
+            $now = ($this->clock)();
+            $expiry = ($ttl !== null) ? ($now + $ttl) : null;
+
+            // If key exists, remove it to update recency
+            if (isset($this->data[$key]) || array_key_exists($key, $this->data)) {
+                unset($this->data[$key]);
+            }
+
+            $this->data[$key] = new Entry($key, $value, $expiry);
+
+            if (count($this->data) > $this->capacity) {
+                // 1. Remove expired
+                foreach ($this->data as $k => $entry) {
+                    if ($entry->expiry !== null && $entry->expiry <= $now) {
+                        unset($this->data[$k]);
+                    }
+                }
+
+                // 2. If still over capacity, remove LRU
+                // In PHP, the first element in the array is the oldest (LRU)
+                while (count($this->data) > $this->capacity) {
+                    // reset() gets the first element, key() gets its key
+                    reset($this->data);
+                    $lruKey = key($this->data);
+                    unset($this->data[$lruKey]);
+                }
+            }
+        }
+        ```
+
+    *   Wait, `array_key_exists` is needed because `isset` returns false if the value is `null`. The prompt says `null` is a valid stored value.
+
+    *   `get` logic:
+        ```php
+        public function get(string $key, mixed $default = null): mixed {
+            if (!array_key_exists($key, $this->data)) {
+                return $default;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return $default;
+            }
+
+            // Update recency: remove and re-add
+            unset($this->data[$key]);
+            $this->data[$key] = $entry;
+
+            return $entry->value;
+        }
+        ```
+
+    *   `has` logic:
+        ```php
+        public function has(string $key): bool {
+            if (!array_key_exists($key, $this->data)) {
+                return false;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+
+            return true;
+        }
+        ```
+
+    *   `delete` logic:
+        ```php
+        public function delete(string $key): bool {
+            if (!array_key_exists($key, $this->data)) {
+                return false;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+
+            unset($this->data[$key]);
+            return true;
+        }
+        ```
+
+    *   `count` logic:
+        ```php
+        public function count(): int {
+            $now = ($this->clock)();
+            $count = 0;
+            foreach ($this->data as $entry) {
+                if ($entry->expiry === null || $entry->expiry > $now) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+
+    *   `keys` logic:
+        ```php
+        public function keys(): array {
+            $now = ($this->clock)();
+            $keys = [];
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry === null || $entry->expiry > $now) {
+                    $keys[] = (string)$k;
+                }
+            }
+            return $keys;
+        }
+        ```
+
+    *   `capacity` must be >= 1.
+    *   `ttl` <= 0 throws `\InvalidArgumentException`.
+    *   `get` returns `$default` for missing/expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` does NOT change recency.
+    *   `keys` returns non-expired keys, LRU to MRU.
+    *   `count` returns non-expired count.
+    *   `set` handles capacity: remove expired first, then LRU.
+
+    *   `$this->data` is an associative array.
+    *   When we `unset($this->data[$key])` and then `$this->data[$key] = $entry`, the key is moved to the end of the array.
+    *   The order of elements in a PHP array is the order in which they were added.
+    *   So, the first element (`reset($this->data); key($this->data);`) is the Least Recently Used.
+    *   The last element is the Most Recently Used.
+    *   `keys()` returns them from LRU to MRU. This matches the requirement.
+
+    *   `set` complexity: The prompt says "O(1) on average (apart from removing expired entries)". My `set` implementation iterates through the whole array to remove expired entries if capacity is exceeded. This is $O(n)$. However, the prompt explicitly allows this by saying "apart from removing expired entries".
+    *   Wait, if I remove expired entries, I might reduce the count significantly.
+    *   The requirement: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   My implementation:
+        ```php
+        if (count($this->data) > $this->capacity) {
+            // 1. Remove expired
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry !== null && $entry->expiry <= $now) {
+                    unset($this->data[$k]);
+                }
+            }
+            // 2. If still over capacity, remove LRU
+            while (count($this->data) > $this->capacity) {
+                reset($this->data);
+                $lruKey = key($this->data);
+                unset($this->data[$lruKey]);
+            }
+        }
+        ```
+    *   This follows the logic perfectly.
+
+    *   `$clock` is a `?\Closure`.
+    *   `$now = ($this->clock)();` works if `$this->clock` is not null.
+    *   If `$this->clock` is null, use `microtime(true)`.
+    *   Better: `$this->clock ?? fn() => microtime(true)`.
+
+    *   PHP 8.4 features:
+        *   Property hooks? Not strictly needed here.
+        *   `readonly` properties? Could use for `$capacity` and `$clock`.
+        *   `mixed` type? Yes.
+        *   `?float`? Yes.
+        *   `\InvalidArgumentException`? Yes.
+
+    *   `count()`: "number of non-expired entries".
+    *   `keys()`: "list of non-expired keys, ordered from least recently used to most recently used".
+    *   My `count` and `keys` iterate through the whole array and check expiry. This is $O(n)$. This is allowed.
+
+    *   The prompt says: "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+    *   My `set` logic:
+        1.  `unset` existing key (to refresh recency).
+        2.  `$this->data[$key] = $entry` (adds to end).
+        3.  If `count > capacity`:
+            a.  Loop through all and `unset` expired.
+            b.  While `count > capacity`, `unset` the first element.
+
+    *   Wait, there's a subtle edge case. If the key being `set` is *already* expired, should it be treated as a new entry? Yes, the `set` method replaces or inserts.
+    *   If the key being `set` is already in the cache, `unset` it first. This ensures that even if it was expired, it's now "new" and at the end of the list.
+
+    *   `get` returns `$default` for missing or expired.
+    *   `get` returns `null` if `null` is stored.
+    *   In PHP, `array_key_exists` is the way to check if a key exists even if the value is `null`.
+    *   My `get` implementation:
+        ```php
+        if (!array_key_exists($key, $this->data)) {
+            return $default;
+        }
+        $entry = $this->data[$key];
+        if ($entry->expiry !== null && $entry->expiry <= $now) {
+            unset($this->data[$key]);
+            return $default;
+        }
+        // ... update recency ...
+        return $entry->value;
+        ```
+        This correctly returns `null` if `$entry->value` is `null`.
+
+    *   `has` returns `true` if exists and not expired.
+    *   `has` does NOT change recency.
+    *   My `has` implementation:
+        ```php
+        if (!array_key_exists($key, $this->data)) {
+            return false;
+        }
+        $entry = $this->data[$key];
+        if ($entry->expiry !== null && $entry->expiry <= $now) {
+            unset($this->data[$key]);
+            return false;
+        }
+        return true;
+        ```
+        This is correct.
+
+    *   `delete` returns `true` if a non-expired entry existed.
+    *   My `delete` implementation:
+        ```php
+        if (!array_key_exists($key, $this->data)) {
+            return false;
+        }
+        $entry = $this->data[$key];
+        if ($entry->expiry !== null && $entry->expiry <= $now) {
+            unset($this->data[$key]);
+            return false;
+        }
+        unset($this->data[$key]);
+        return true;
+        ```
+        This is correct.
+
+    *   `keys` returns non-expired keys, LRU to MRU.
+    *   In PHP, `foreach` on an associative array follows insertion order.
+    *   Since we `unset` and re-add on `get` and `set`, the order is indeed LRU to MRU.
+    *   The `keys` method:
+        ```php
+        public function keys(): array {
+            $now = ($this->clock)();
+            $keys = [];
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry === null || $entry->expiry > $now) {
+                    $keys[] = (string)$k;
+                }
+            }
+            return $keys;
+        }
+        ```
+        This is correct.
+
+    *   `set` complexity: "O(1) on average (apart from removing expired entries)".
+    *   My `set` does a full scan if `count > capacity`. This is $O(n)$.
+    *   Is there a way to make it $O(1)$ average?
+    *   If we only remove the *oldest* expired entry, we'd need a priority queue. But the requirement says "first remove expired entries" (plural). This implies a scan.
+    *   Actually, if we only remove expired entries when we are over capacity, and we do a full scan, it's $O(n)$. But the prompt says "apart from removing expired entries", which is a huge hint that $O(n)$ for that specific part is acceptable.
+
+    *   `__construct(int $capacity, ?\Closure $clock = null)`
+    *   `set(string $key, mixed $value, ?float $ttl = null): void`
+    *   `get(string $key, mixed $default = null): mixed`
+    *   `has(string $key): bool`
+    *   `delete(string $key): bool`
+    *   `count(): int`
+    *   `keys(): array`
+    *   `\Countable` implementation.
+
+    *   `$capacity` must be >= 1.
+    *   `$ttl` <= 0 throws `\InvalidArgumentException`.
+    *   `$clock` returns float.
+
+    *   `Entry` class should be private or internal. Since no namespace is allowed, I'll just define it in the same file.
+
+    ```php
+    class Entry {
+        public function __construct(
+            public string $key,
+            public mixed $value,
+            public ?float $expiry = null
+        ) {}
+    }
+    ```
+
+    *   `set` logic:
+        ```php
+        public function set(string $key, mixed $value, ?float $ttl = null): void {
+            if ($ttl !== null && $ttl <= 0) {
+                throw new \InvalidArgumentException("TTL must be positive.");
+            }
+
+            $now = ($this->clock)();
+            $expiry = ($ttl !== null) ? ($now + $ttl) : null;
+
+            // If key exists, remove it to update recency
+            // We use array_key_exists because value could be null
+            if (array_key_exists($key, $this->data)) {
+                unset($this->data[$key]);
+            }
+
+            $this->data[$key] = new Entry($key, $value, $expiry);
+
+            if (count($this->data) > $this->capacity) {
+                // 1. Remove expired entries
+                foreach ($this->data as $k => $entry) {
+                    if ($entry->expiry !== null && $entry->expiry <= $now) {
+                        unset($this->data[$k]);
+                    }
+                }
+
+                // 2. If still over capacity, evict LRU
+                while (count($this->data) > $this->capacity) {
+                    // The first element in the array is the LRU
+                    reset($this->data);
+                    $lruKey = key($this->data);
+                    unset($this->data[$lruKey]);
+                }
+            }
+        }
+        ```
+
+    *   `get` logic:
+        ```php
+        public function get(string $key, mixed $default = null): mixed {
+            if (!array_key_exists($key, $this->data)) {
+                return $default;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return $default;
+            }
+
+            // Update recency: remove and re-add
+            unset($this->data[$key]);
+            $this->data[$key] = $entry;
+
+            return $entry->value;
+        }
+        ```
+
+    *   `has` logic:
+        ```php
+        public function has(string $key): bool {
+            if (!array_key_exists($key, $this->data)) {
+                return false;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+
+            return true;
+        }
+        ```
+
+    *   `delete` logic:
+        ```php
+        public function delete(string $key): bool {
+            if (!array_key_exists($key, $this->data)) {
+                return false;
+            }
+
+            $entry = $this->data[$key];
+            $now = ($this->clock)();
+
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+
+            unset($this->data[$key]);
+            return true;
+        }
+        ```
+
+    *   `count` logic:
+        ```php
+        public function count(): int {
+            $now = ($this->clock)();
+            $count = 0;
+            foreach ($this->data as $entry) {
+                if ($entry->expiry === null || $entry->expiry > $now) {
+                    $count++;
+                }
+            }
+            return $count;
+        }
+        ```
+
+    *   `keys` logic:
+        ```php
+        public function keys(): array {
+            $now = ($this->clock)();
+            $keys = [];
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry === null || $entry->expiry > $now) {
+                    $keys[] = (string)$k;
+                }
+            }
+            return $keys;
+        }
+        ```
+
+    *   `__construct(int $capacity, ?\Closure $clock = null)`:
+        ```php
+        public function __construct(
+            private readonly int $capacity,
+            private readonly \Closure $clock
+        ) {
+            if ($this->capacity < 1) {
+                throw new \InvalidArgumentException("Capacity must be at least 1.");
+            }
+            // If clock is null, use microtime(true)
+            // But the constructor signature says ?\Closure.
+            // So I need to handle the null case.
+        }
+        ```
+        Wait, if I use `private readonly \Closure $clock`, I can't pass `null` to it.
+        I should handle the null in the constructor.
+
+        ```php
+        public function __construct(
+            private readonly int $capacity,
+            ?\Closure $clock = null
+        ) {
+            if ($this->capacity < 1) {
+                throw new \InvalidArgumentException("Capacity must be at least 1.");
+            }
+            $this->clock = $clock ?? fn() => microtime(true);
+        }
+        ```
+        Wait, if I declare `private readonly \Closure $clock`, I can't assign to it in the constructor if it's already initialized via promoted properties.
+        Actually, I can just not use promoted properties for `$clock` or handle it like this:
+
+        ```php
+        private readonly int $capacity;
+        private readonly \Closure $clock;
+
+        public function __construct(int $capacity, ?\Closure $clock = null) {
+            if ($capacity < 1) {
+                throw new \InvalidArgumentException("Capacity must be at least 1.");
+            }
+            $this->capacity = $capacity;
+            $this->clock = $clock ?? fn() => microtime(true);
+        }
+        ```
+
+    *   `set` replaces TTL: "Replacing an entry also replaces its TTL." - My code does this.
+    *   `get` returns `$default` for missing/expired: My code does this.
+    *   `get` returns `null` if `null` is stored: My code does this.
+    *   `has` does NOT change recency: My code does this.
+    *   `keys` order: LRU to MRU. My code does this.
+    *   `count` and `keys` are $O(n)$: My code does this.
+    *   `get`, `set`, `has`, `delete` are $O(1)$ average: My code does this (with the exception of the expired-removal scan in `set`).
+
+    *   `reset($this->data); $lruKey = key($this->data);` is a standard way to get the first key of an array.
+    *   `array_key_exists` is safer than `isset` for `null` values.
+    *   The `Entry` class can be a simple class.
+
+    *   `$ttl <= 0` throws `\InvalidArgumentException`.
+    *   `$capacity < 1` throws `\InvalidArgumentException`.
+    *   `$clock` returns float.
+
+    *   `set` logic:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            unset($this->data[$key]);
+        }
+        $this->data[$key] = new Entry($key, $value, $expiry);
+        ```
+        This handles both "insert" and "replace" and "update recency".
+
+    *   Wait, if I `unset` and then `set`, the key is moved to the end. This is correct for LRU.
+
+    *   `get` logic:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            $entry = $this->data[$key];
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return $default;
+            }
+            unset($this->data[$key]);
+            $this->data[$key] = $entry;
+            return $entry->value;
+        }
+        return $default;
+        ```
+        This is correct.
+
+    *   `has` logic:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            $entry = $this->data[$key];
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+            return true;
+        }
+        return false;
+        ```
+        This is correct.
+
+    *   `delete` logic:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            $entry = $this->data[$key];
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+            unset($this->data[$key]);
+            return true;
+        }
+        return false;
+        ```
+        This is correct.
+
+    *   `keys` logic:
+        ```php
+        foreach ($this->data as $k => $entry) {
+            if ($entry->expiry === null || $entry->expiry > $now) {
+                $keys[] = (string)$k;
+            }
+        }
+        ```
+        Since PHP arrays are ordered by insertion, and we move items to the end on `get` and `set`, the order is LRU to MRU.
+
+    *   `count` logic:
+        ```php
+        foreach ($this->data as $entry) {
+            if ($entry->expiry === null || $entry->expiry > $now) {
+                $count++;
+            }
+        }
+        ```
+        This is correct.
+
+    *   `set` complexity:
+        "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        My code:
+        ```php
+        if (count($this->data) > $this->capacity) {
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry !== null && $entry->expiry <= $now) {
+                    unset($this->data[$k]);
+                }
+            }
+            while (count($this->data) > $this->capacity) {
+                reset($this->data);
+                $lruKey = key($this->data);
+                unset($this->data[$lruKey]);
+            }
+        }
+        ```
+        This is exactly what was requested.
+
+    *   `capacity` is `int`.
+    *   `ttl` is `?float`.
+    *   `clock` is `?\Closure`.
+    *   `get` returns `mixed`.
+    *   `has` returns `bool`.
+    *   `delete` returns `bool`.
+    *   `count` returns `int`.
+    *   `keys` returns `array`.
+
+    *   PHP 8.4 allows `readonly` properties.
+    *   `mixed` is available.
+    *   `\Closure` is available.
+    *   `\InvalidArgumentException` is available.
+    *   `\Countable` is available.
+
+    *   One small detail: `reset($this->data); $lruKey = key($this->data);`
+    *   If `count($this->data)` is 0, `reset` and `key` might behave differently, but the `while` loop condition `count($this->data) > $this->capacity` ensures `count` is at least 1 (since `capacity` >= 1).
+
+    *   Wait, if `capacity` is 1 and I add a second item, `count` becomes 2.
+    *   `2 > 1` is true.
+    *   Scan for expired.
+    *   If none expired, `while (2 > 1)`:
+        *   `reset` -> first item.
+        *   `key` -> first key.
+        *   `unset` first key.
+        *   `count` becomes 1.
+    *   Loop ends.
+    *   Result: only the new item remains. Correct.
+
+    *   One more thing: `keys()` returns "list of non-expired keys, ordered from least recently used to most recently used".
+    *   In my implementation, the array order is:
+        *   Oldest (LRU) at the beginning.
+        *   Newest (MRU) at the end.
+    *   So `foreach ($this->data as $k => $entry)` will iterate from LRU to MRU.
+    *   This is correct.
+
+    *   `$ttl <= 0` throws `\InvalidArgumentException`.
+    *   `$capacity < 1` throws `\InvalidArgumentException`.
+    *   `get` returns `$default` for missing or expired.
+    *   `get` returns `null` if `null` is stored.
+    *   `has` does not change recency.
+    *   `delete` returns `true` if a non-expired entry existed.
+    *   `count` returns number of non-expired entries.
+    *   `keys` returns non-expired keys, LRU to MRU.
+    *   `set` handles capacity: remove expired first, then LRU.
+    *   `set` replaces TTL.
+    *   `set` makes entry most recently used.
+    *   `get` makes entry most recently used.
+
+    *   `$this->clock` is a `\Closure`.
+    *   `$now = ($this->clock)();`
+    *   This is correct.
+
+    *   Wait, I should make sure the `Entry` class is not accessible from outside if possible, but since there's no namespace, I'll just define it. The prompt doesn't forbid it.
+
+    *   `reset()` and `key()` on an array:
+        `reset($array)` moves the internal pointer to the first element.
+        `key($array)` returns the key of the element the pointer is currently on.
+        This is perfect for getting the first key.
+
+    *   `array_key_exists` vs `isset`:
+        `isset($this->data[$key])` is false if `$this->data[$key]` is `null`.
+        `array_key_exists($key, $this->data)` is true even if the value is `null`.
+        The requirement says `null` is a valid stored value. So `array_key_exists` is mandatory.
+
+    *   `set` complexity:
+        "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        If I have 1,000,000 entries and capacity is 10, and I add the 1,000,001st entry, I will scan all 1,000,001 entries. This is $O(n)$. The prompt says "O(1) on average (apart from removing expired entries)", which justifies this.
+
+    *   One edge case: `set` with an existing key.
+        If I `set` a key that already exists, I should update its value and TTL and move it to the end.
+        My code:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            unset($this->data[$key]);
+        }
+        $this->data[$key] = new Entry($key, $value, $expiry);
+        ```
+        This works.
+
+    *   Wait, if I `set` a key that is *already* expired, `array_key_exists` will find it, `unset` it, and then I add the new one. This is fine.
+
+    *   Final check on `keys()`:
+        "Keys must be returned exactly as given (as strings)."
+        My code: `$keys[] = (string)$k;`. This is safe.
+
+    *   Final check on `count()`:
+        "number of non-expired entries".
+        My code:
+        ```php
+        foreach ($this->data as $entry) {
+            if ($entry->expiry === null || $entry->expiry > $now) {
+                $count++;
+            }
+        }
+        ```
+        This is correct.
+
+    *   Final check on `has()`:
+        "true if the entry exists and is not expired. Does NOT change recency."
+        My code:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            $entry = $this->data[$key];
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]); // Remove expired
+                return false;
+            }
+            return true;
+        }
+        return false;
+        ```
+        This is correct.
+
+    *   Final check on `delete()`:
+        "removes the entry; returns true if a non-expired entry existed."
+        My code:
+        ```php
+        if (array_key_exists($key, $this->data)) {
+            $entry = $this->data[$key];
+            if ($entry->expiry !== null && $entry->expiry <= $now) {
+                unset($this->data[$key]);
+                return false;
+            }
+            unset($this->data[$key]);
+            return true;
+        }
+        return false;
+        ```
+        This is correct.
+
+    *   Wait, if `has` or `delete` removes an expired entry, is that okay?
+        The prompt says `has` "Does NOT change recency". It doesn't say it shouldn't remove expired entries. In fact, `get` and `delete` and `has` all imply that an expired entry is no longer "there".
+        `get`: "A missing or expired entry returns $default (an expired entry is removed)."
+        `has`: "true if the entry exists and is not expired."
+        `delete`: "returns true if a non-expired entry existed."
+        So yes, removing them is correct.
+
+    *   One last thing: `set` capacity logic.
+        "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        My code:
+        ```php
+        if (count($this->data) > $this->capacity) {
+            // 1. Remove expired
+            foreach ($this->data as $k => $entry) {
+                if ($entry->expiry !== null && $entry->expiry <= $now) {
+                    unset($this->data[$k]);
+                }
+            }
+            // 2. If still over capacity, evict LRU
+            while (count($this->data) > $this->capacity) {
+                reset($this->data);
+                $lruKey = key($this->data);
+                unset($this->data[$lruKey]);
+            }
+        }
+        ```
+        This is perfect.
+
+    *   `$capacity` is `int`.
+    *   `$clock` is `?\Closure`.
+    *   `$ttl` is `?float`.
+    *   `$key` is `string`.
+    *   `$value` is `mixed`.
+    *   `$default` is `mixed`.
+
+    *   Wait, I should use `private readonly` for `$capacity` and `$clock` to be modern.
+
+    *   The `Entry` class:
+        ```php
+        class Entry {
+            public function __construct(
+                public string $key,
+                public mixed $value,
+                public ?float $expiry = null,
+            ) {}
+        }
+        ```
+
+    *   The `LruCache` class:
+        ```php
+        class LruCache implements \Countable {
+            private readonly int $capacity;
+            private readonly \Closure $clock;
+            /** @var array<string, Entry> */
+            private array $data = [];
+
+            public function __construct(int $capacity, ?\Closure $clock = null) {
+                if ($capacity < 1) {
+                    throw new \InvalidArgumentException("Capacity must be >= 1.");
+                }
+                $this->capacity = $capacity;
+                $this->clock = $clock ?? fn() => microtime(true);
+            }
+            // ... methods ...
+        }
+        ```
+
+    *   Wait, the `set` method:
+        "If the cache now holds more than $capacity entries, first remove expired entries; if still over capacity, evict the least recently used entry."
+        If I add an entry and it *becomes* the 11th entry in a 10-capacity cache, I check if `count > 10`.
+        If I have 10 entries, and I `set` a new key, `count` becomes 11.
+        Then I remove expired.
+        If I still have 11, I remove the LRU.
+        This is correct.
+
+    *   Wait, what if the key I am `set`-ing is *already* in the cache?
+        `unset($this->data[$key])`
+        `$this->data[$key] = $entry`
+        `count` doesn't increase.
+        So `count > capacity` will be false.
+        This is also correct.
+
+    *   What if `capacity` is 10, and I have 10 entries, and I `set` an *existing* key?
+        `count` stays 10. `10 > 10` is false.
+        The entry is updated and moved to the end.
+        This is correct.
+
+    *   What if `capacity` is 10, and I have 10 entries, and I `set` a *new* key?
+        `count` becomes 11. `11 > 10` is true.
+        We remove expired.
+        If we still have 11, we remove the LRU.
+        This is correct.
+
+    *   One final check on `keys()`:
+        "list of non-expired keys, ordered from least recently used to most recently used."
+        My `foreach` on `$this->data` will go from the first element (oldest) to the last element (newest).
+        So the order is LRU to MRU.
+        Correct.

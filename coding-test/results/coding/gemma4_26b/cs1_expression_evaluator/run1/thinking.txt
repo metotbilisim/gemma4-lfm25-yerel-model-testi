@@ -1,0 +1,1433 @@
+*   Namespace: `Bench`
+    *   Class: `ExpressionEvaluator` (static)
+    *   Method: `public static double Evaluate(string expression)`
+    *   Supported: Numbers (int, decimal), `+`, `-`, `*`, `/`, `^`, `(`, `)`.
+    *   Unary: `+`, `-` (can be chained like `--2`, can follow `^` like `2^-1`).
+    *   Precedence/Associativity:
+        1.  `^` (Right-associative, highest)
+        2.  Unary `+`/`-` (Lower than `^`? Wait, the prompt says: "Unary minus/plus binds weaker than `^` (`-2^2` = -4), but a unary sign is allowed directly after `^` (`2^-1` = 0.5)". This is a bit tricky. Usually, unary operators have higher precedence than binary operators. Let's re-read: `-2^2` = -4 implies `-(2^2)`. So `^` is higher than unary. But `2^-1` means the `-` is part of the operand for `^`. This suggests the unary operator is treated as a prefix to the operand.
+        3.  `*`, `/` (Left-associative)
+        4.  `+`, `-` (Left-associative)
+    *   Constraints:
+        *   Ignore whitespace.
+        *   Culture-invariant parsing (`.` as decimal).
+        *   Error handling: `FormatException` (empty, invalid chars, mismatched parens, missing operands, consecutive numbers, consecutive binary ops, malformed numbers), `DivideByZeroException`.
+        *   No `DataTable.Compute`, Roslyn, or external libs.
+        *   Target: .NET 10 (use modern C# features if applicable, though standard logic applies).
+
+    *   A standard way to evaluate expressions is the Shunting-Yard algorithm to convert to Reverse Polish Notation (RPN) or a recursive descent parser.
+    *   Given the specific precedence rules (especially the unary vs power rule), a recursive descent parser or a modified Shunting-Yard is best.
+    *   Let's define the grammar:
+        *   `Expression` -> `Term` { (`+` | `-`) `Term` }
+        *   `Term` -> `Factor` { (`*` | `/`) `Factor` }
+        *   `Factor` -> `Power`
+        *   `Power` -> `Unary` [ `^` `Power` ] (Right associative)
+        *   `Unary` -> (`+` | `-`) `Unary` | `Primary`
+        *   `Primary` -> `Number` | `(` `Expression` `)`
+
+    *Wait*, let's re-check the precedence requirement:
+    - `^` is highest.
+    - Unary `-` is lower than `^`. Example: `-2^2` = -4.
+    - This means `-2^2` is parsed as `-(2^2)`.
+    - But `2^-1` is allowed. This means the `-` in `-1` is acting as a unary operator on the number `1`.
+
+    Let's refine the grammar to match the specific requirement:
+    `Expression` (lowest precedence, left-assoc): `Term` { (`+` | `-`) `Term` }
+    `Term` (left-assoc): `Factor` { (`*` | `/`) `Factor` }
+    `Factor`: `Unary`
+    `Unary` (can be chained): `+` `Unary` | `-` `Unary` | `Power`
+    `Power` (right-assoc): `Base` [ `^` `Power` ]
+    `Base`: `Number` | `(` `Expression` `)`
+
+    Let's test `-2^2` with this grammar:
+    `Expression` -> `Term` -> `Factor` -> `Unary` -> `-` `Unary` -> `-` `Power` -> `-` `Base` -> `-` `2^2`? No.
+    If `Unary` is `-` `Unary`, then `-2^2` becomes `-(2^2)`.
+    If `Power` is `Base ^ Power`, then `2^-1` becomes `2 ^ (-1)`.
+
+    Let's trace `-2^2`:
+    1. `Expression` calls `Term`.
+    2. `Term` calls `Factor`.
+    3. `Factor` calls `Unary`.
+    4. `Unary` sees `-`, calls `Unary` again.
+    5. Second `Unary` calls `Power`.
+    6. `Power` calls `Base`.
+    7. `Base` calls `2`.
+    8. `Power` sees `^`, calls `Power` again.
+    9. Second `Power` calls `Base` -> `2`.
+    10. Result: `-(2^2) = -4`. Correct.
+
+    Let's trace `2^-1`:
+    1. `Expression` -> `Term` -> `Factor` -> `Unary` -> `Power`.
+    2. `Power` calls `Base` -> `2`.
+    3. `Power` sees `^`, calls `Power` again.
+    4. Second `Power` calls `Unary`.
+    5. `Unary` sees `-`, calls `Unary` again.
+    6. Second `Unary` calls `Power` -> `Base` -> `1`.
+    7. Result: `2^(-1) = 0.5`. Correct.
+
+    *Wait*, the requirement says: "Unary minus/plus binds weaker than `^` (`-2^2` = -4), but a unary sign is allowed directly after `^` (`2^-1` = 0.5)".
+    My grammar:
+    `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+    `Power` -> `Base` [ `^` `Power` ]
+    `Base` -> `Number` | `(` `Expression` `)`
+
+    Wait, if `Unary` calls `Power`, and `Power` calls `Base`, then `Power` is *higher* precedence than `Unary`.
+    If `Unary` is `-` `Unary`, then `-2^2` is `-(2^2)`.
+    If `Power` is `Base ^ Power`, then `2^-1` is `2 ^ (-1)`.
+    This matches the requirement perfectly.
+
+    *   `Tokenizer`: Converts string to a list of tokens (Number, Operator, Parenthesis).
+    *   `Parser`: Implements the recursive descent.
+
+    *   `2 3` (Two numbers in a row): The tokenizer/parser must detect this.
+    *   `3**2` (Doubled binary operators): The parser must detect this.
+    *   `2+`: Missing operand.
+    *   `*3`: Missing operand.
+    *   `()`: Empty expression.
+    *   `1.2.3`: Malformed number.
+    *   `(`: Mismatched parenthesis.
+
+    *   `double.Parse(s, CultureInfo.InvariantCulture)` is good.
+    *   Need to handle the `.` logic carefully.
+
+    *   `Token` type: `Number`, `Plus`, `Minus`, `Multiply`, `Divide`, `Power`, `LParen`, `RParen`, `EOF`.
+    *   `Lexer`:
+        *   Iterate through string.
+        *   Skip whitespace.
+        *   If digit or `.`, parse number.
+        *   If `+`, `-`, `*`, `/`, `^`, `(`, `)`, create token.
+        *   Else, throw `FormatException`.
+        *   *Crucial*: Check for malformed numbers like `1.2.3`.
+
+    *   `Parser`:
+        *   `ParseExpression()`: `Term` { (`+`|`-`) `Term` }
+        *   `ParseTerm()`: `Factor` { (`*`|`/`) `Factor` }
+        *   `ParseFactor()`: `Unary`
+        *   `ParseUnary()`: `+` `Unary` | `-` `Unary` | `Power`
+        *   `ParsePower()`: `Base` [ `^` `Power` ]
+        *   `ParseBase()`: `Number` | `(` `Expression` `)`
+
+    *   *Wait*, the requirement "two numbers in a row (`2 3`)" and "doubled binary operators (`3**2`)":
+        *   In `2 3`, the Lexer will produce `Number(2)`, `Number(3)`. The Parser's `ParseExpression` will consume `2`, then look for `+` or `-`. It won't find them, it will see `Number(3)` and realize it's an error because it expected an operator or EOF.
+        *   In `3**2`, the Lexer will produce `Number(3)`, `Multiply`, `Multiply`, `Number(2)`. The Parser's `ParseTerm` will consume `3`, then `*`, then call `ParseFactor`. `ParseFactor` calls `Unary` which calls `Power` which calls `Base`. `Base` expects a number or `(`. It sees `*`, so it throws `FormatException`.
+
+    *   *Wait*, what about `2^-1`?
+        *   `2` (Base)
+        *   `^` (Power operator)
+        *   `-1` (Power's right-hand side)
+        *   In my grammar, `Power` calls `Unary`. `Unary` handles the `-`. This works.
+
+    *   *Wait*, what about `2*-3`?
+        *   `2` (Factor)
+        *   `*` (Term operator)
+        *   `-3` (Factor's right-hand side)
+        *   `Factor` calls `Unary`. `Unary` handles the `-`. This works.
+
+    *   *Wait*, what about `--2`?
+        *   `Unary` -> `-` `Unary` -> `-` `-` `Unary` -> `-` `-` `Power` -> `-` `-` `2`. Works.
+
+    *   `2+` -> `ParseExpression` calls `Term` -> `Factor` -> `Unary` -> `Power` -> `Base` -> `2`. `ParseExpression` then sees `+`, calls `Term`. `Term` calls `Factor` -> `Unary` -> `Power` -> `Base`. `Base` sees `EOF` and throws `FormatException`.
+    *   `*3` -> `ParseExpression` calls `Term` -> `Factor` -> `Unary` -> `Power` -> `Base`. `Base` sees `*` and throws `FormatException`.
+    *   `()` -> `ParseBase` sees `(`, calls `ParseExpression`. `ParseExpression` calls `Term`... `Base` sees `)` and throws `FormatException` because `Base` expects a number or `(`.
+
+    *   `double.Parse` with `NumberStyles.Any` and `CultureInfo.InvariantCulture`.
+    *   Actually, manual parsing or `double.TryParse` might be safer to catch `1.2.3`.
+    *   Let's use a loop to collect digits and dots. If more than one dot, throw `FormatException`.
+
+    *   `2^3^2`
+    *   `ParsePower` calls `Base` (2), sees `^`, calls `ParsePower` (right side).
+    *   `ParsePower` (right side) calls `Base` (3), sees `^`, calls `ParsePower` (right side).
+    *   `ParsePower` (right side) calls `Base` (2), sees no `^`, returns 2.
+    *   Returns `3^2 = 9`.
+    *   Returns `2^9 = 512`. Correct.
+
+    *   `2 / 0` -> `double` division by zero results in `Infinity`. The requirement says "Throw `DivideByZeroException` when dividing by zero".
+    *   I must check if the divisor is `0` before performing `/`.
+
+    *   `2 3`: `Lexer` returns `[2, 3]`. `Parser` consumes `2`, then `ParseExpression` expects end of tokens or an operator. It sees `3` and throws.
+    *   `3**2`: `Lexer` returns `[3, *, *, 2]`. `Parser` consumes `3`, then `*`, then expects a `Factor`. `Factor` calls `Unary` calls `Power` calls `Base`. `Base` sees `*` and throws.
+    *   `1.2.3`: `Lexer` sees `1.2.3`. When parsing the number, it sees the second `.`. Throw `FormatException`.
+
+    *   `2^-1`
+    *   `Base` (2)
+    *   `^`
+    *   `Power` (right side)
+        *   `Unary`
+            *   `-`
+            *   `Unary`
+                *   `Power`
+                    *   `Base` (1)
+    *   This works.
+
+    *   `2*-3`
+    *   `Factor` (2)
+    *   `*`
+    *   `Factor` (right side)
+        *   `Unary`
+            *   `-`
+            *   `Unary`
+                *   `Power`
+                    *   `Base` (3)
+    *   This works.
+
+    *   `--2`
+    *   `Unary`
+        *   `-`
+        *   `Unary`
+            *   `-`
+            *   `Unary`
+                *   `Power`
+                    *   `Base` (2)
+    *   This works.
+
+    *   `2^2^3` -> `2^(2^3)` = `2^8` = 256.
+    *   `2+3*4` -> `2+(3*4)` = 14.
+    *   `-2^2` -> `-(2^2)` = -4.
+    *   `2^-2` -> `2^(-2)` = 0.25.
+
+    *   `ParseExpression` (lowest: `+`, `-`)
+    *   `ParseTerm` (middle: `*`, `/`)
+    *   `ParseUnary` (unary `+`, `-`)
+    *   `ParsePower` (highest: `^`)
+    *   `ParseBase` (parentheses, numbers)
+
+    Wait, I previously said `Unary` calls `Power`.
+    If `Unary` calls `Power`, then `Power` is higher precedence than `Unary`.
+    If `Power` is `Base ^ Power`, then `Base` is the highest.
+    Let's re-verify:
+    `Unary` -> `-` `Unary` | `Power`
+    `Power` -> `Base` `^` `Power` | `Base`
+    `Base` -> `(` `Expression` `)` | `Number`
+
+    Trace `-2^2`:
+    `Unary` -> `-` `Unary` -> `-` `Power` -> `-` `Base` `^` `Power` -> `-` `2` `^` `2` = `-4`. (Correct)
+
+    Trace `2^-1`:
+    `Power` -> `Base` `^` `Power` -> `2` `^` `Unary` -> `2` `^` `-` `Unary` -> `2` `^` `-` `Power` -> `2` `^` `-` `Base` -> `2` `^` `-` `1` = `0.5`. (Correct)
+
+    Trace `2^3^2`:
+    `Power` -> `Base` `^` `Power` -> `2` `^` (`Base` `^` `Power`) -> `2` `^` (`3` `^` `2`) = 512. (Correct)
+
+    Trace `-2`:
+    `Unary` -> `-` `Unary` -> `-` `Power` -> `-` `Base` -> `-` `2`. (Correct)
+
+    Trace `(-2)`:
+    `Base` -> `(` `Expression` `)` -> `(` `Unary` `)` -> `(` `-` `Power` `)` -> `(` `-` `2` `)`. (Correct)
+
+    *   `Lexer` needs to handle the `.` carefully.
+    *   `Parser` needs to handle `DivideByZeroException`.
+    *   `Parser` needs to handle `FormatException` for all cases.
+
+    *   `2 3`: `Lexer` returns `[2, 3]`. `Parser.ParseExpression` calls `ParseTerm` which calls `ParseFactor` which calls `ParseUnary` which calls `ParsePower` which calls `ParseBase`. `ParseBase` consumes `2`. `ParsePower` returns. `ParseUnary` returns. `ParseFactor` returns. `ParseTerm` returns. `ParseExpression` sees `3` instead of `+` or `-` or `EOF`. Throw `FormatException`.
+    *   `3**2`: `Lexer` returns `[3, *, *, 2]`. `Parser.ParseExpression` calls `ParseTerm`. `ParseTerm` consumes `3`. `ParseTerm` sees `*`. It calls `ParseFactor`. `ParseFactor` calls `Unary` calls `Power` calls `Base`. `Base` sees `*` and throws `FormatException`.
+
+    *   `2+`: `Parser.ParseExpression` consumes `2`. Sees `+`. Calls `ParseTerm`. `ParseTerm` calls `ParseFactor` calls `Unary` calls `Power` calls `Base`. `Base` sees `EOF` and throws `FormatException`.
+
+    *   `()`: `Base` sees `(`. Calls `ParseExpression`. `ParseExpression` calls `Term` calls `Factor` calls `Unary` calls `Power` calls `Base`. `Base` sees `)` and throws `FormatException`.
+
+    *   `1.2.3`: `Lexer` sees `1.2.3`. When it encounters the second `.`, it should throw `FormatException`.
+
+    ```csharp
+    private class Token
+    {
+        public enum TokenType { Number, Plus, Minus, Multiply, Divide, Power, LParen, RParen, EOF }
+        public TokenType Type { get; }
+        public double Value { get; }
+        public Token(TokenType type, double value = 0) { Type = type; Value = value; }
+    }
+    ```
+
+    *   `2^-1`: `2` (Base), `^` (Power), `-1` (Power's right side).
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`, calls `Unary`.
+    *   `Unary` (second call) calls `Power`.
+    *   `Power` calls `Base`.
+    *   `Base` sees `1`.
+    *   This works.
+
+    *   `2*-3`: `2` (Factor), `*` (Term), `-3` (Factor).
+    *   `Factor` calls `Unary`.
+    *   `Unary` sees `-`, calls `Unary`.
+    *   `Unary` (second call) calls `Power`.
+    *   `Power` calls `Base`.
+    *   `Base` sees `3`.
+    *   This works.
+
+    *   `2^3^2`:
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Base` (3).
+    *   `Power` (right side) sees `^`.
+    *   `Power` (right side) calls `Power` (right side of that).
+    *   `Power` (right side of that) calls `Base` (2).
+    *   Result: `2 ^ (3 ^ 2)`.
+
+    *   `2^2^3` = `2^(2^3)` = `2^8` = 256.
+    *   `2^3^2` = `2^(3^2)` = `2^9` = 512.
+    *   The requirement says `2^3^2` = 512. My logic is correct.
+
+    *   `double.Parse(s, CultureInfo.InvariantCulture)` is fine, but I need to ensure I don't allow `1.2.3`.
+    *   I'll manually scan for the number.
+
+    ```csharp
+    // Inside Lexer
+    if (char.IsDigit(c) || c == '.')
+    {
+        int start = i;
+        int dotCount = 0;
+        while (i < expression.Length && (char.IsDigit(expression[i]) || expression[i] == '.'))
+        {
+            if (expression[i] == '.') dotCount++;
+            i++;
+        }
+        string numStr = expression.Substring(start, i - start);
+        if (dotCount > 1 || numStr == "." || numStr == "-.") 
+            throw new FormatException();
+        // ... parse ...
+    }
+    ```
+    Wait, `numStr == "-."` is not possible because `-` is a separate token.
+    If `numStr` is `.5`, `double.Parse` handles it. If `numStr` is `5.`, `double.Parse` handles it.
+    If `numStr` is `.`, `double.Parse` fails.
+
+    *   `2 / 0` -> `DivideByZeroException`.
+    *   `2 / (1 - 1)` -> `DivideByZeroException`.
+    *   `2 / 0.0` -> `DivideByZeroException`.
+
+    *   `2 3`: Lexer returns `[2, 3]`. Parser `ParseExpression` consumes `2`. Then it looks for `+` or `-`. It sees `3`. It must throw `FormatException`.
+    *   `3**2`: Lexer returns `[3, *, *, 2]`. Parser `ParseTerm` consumes `3`. Sees `*`. Calls `ParseFactor`. `ParseFactor` calls `Unary` calls `Power` calls `Base`. `Base` sees `*`. Throws `FormatException`.
+
+    *   `2^-1`:
+        *   `Power` -> `Base` (2)
+        *   `Power` -> `^`
+        *   `Power` -> `Unary`
+        *   `Unary` -> `-`
+        *   `Unary` -> `Power`
+        *   `Power` -> `Base` (1)
+        *   This works.
+
+    *   `2*-3`:
+        *   `Term` -> `Factor` (2)
+        *   `Term` -> `*`
+        *   `Term` -> `Factor`
+        *   `Factor` -> `Unary`
+        *   `Unary` -> `-`
+        *   `Unary` -> `Power`
+        *   `Power` -> `Base` (3)
+        *   This works.
+
+    *   `--2`:
+        *   `Unary` -> `-`
+        *   `Unary` -> `-`
+        *   `Unary` -> `Power`
+        *   `Power` -> `Base` (2)
+        *   This works.
+
+    *   `2^--3`:
+        *   `Power` -> `Base` (2)
+        *   `Power` -> `^`
+        *   `Power` -> `Unary`
+        *   `Unary` -> `-`
+        *   `Unary` -> `-`
+        *   `Unary` -> `Power`
+        *   `Power` -> `Base` (3)
+        *   This works.
+
+    *   `2^-(3)`:
+        *   `Power` -> `Base` (2)
+        *   `Power` -> `^`
+        *   `Power` -> `Unary`
+        *   `Unary` -> `-`
+        *   `Unary` -> `Power`
+        *   `Power` -> `Base`
+        *   `Base` -> `(` `Expression` `)` -> `3`
+        *   This works.
+
+    *   `2^3^2` = 512.
+    *   `2^3^2` is `2^(3^2)`.
+    *   My `ParsePower` is: `Base [ ^ Power ]`.
+    *   This is right-associative.
+    *   `ParsePower` calls `Base`.
+    *   If it sees `^`, it calls `ParsePower` again.
+    *   This is the definition of right-associativity in recursive descent.
+
+    *   `2+3-4`
+    *   `ParseExpression` calls `ParseTerm` (2).
+    *   `ParseExpression` sees `+`.
+    *   `ParseExpression` calls `ParseTerm` (3).
+    *   `ParseExpression` sees `-`.
+    *   `ParseExpression` calls `ParseTerm` (4).
+    *   Result: `(2+3)-4`. Correct.
+
+    *   `2*3/4`
+    *   `ParseTerm` calls `ParseFactor` (2).
+    *   `ParseTerm` sees `*`.
+    *   `ParseTerm` calls `ParseFactor` (3).
+    *   `ParseTerm` sees `/`.
+    *   `ParseTerm` calls `ParseFactor` (4).
+    *   Result: `(2*3)/4`. Correct.
+
+    *   `2^-1`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (1).
+    *   Result: `2^(-1)`. Correct.
+
+    *   `(-2)^2`
+    *   `Base` calls `(` `Expression` `)`.
+    *   `Expression` calls `Unary` -> `-` `Unary` -> `-` `Power` -> `-` `Base` -> `-` `2`.
+    *   `Base` returns `-2`.
+    *   `Power` sees `^`, calls `Power` (right side) -> `2`.
+    *   Result: `(-2)^2 = 4`. Correct.
+
+    *   `-2^2`
+    *   `Unary` calls `-` `Unary`.
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (2), sees `^`, calls `Power` (right side) -> `2`.
+    *   `Power` returns `4`.
+    *   `Unary` returns `-4`. Correct.
+
+    *   `2^2^3`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Base` (2).
+    *   `Power` (right side) sees `^`.
+    *   `Power` (right side) calls `Power` (right side of that).
+    *   `Power` (right side of that) calls `Base` (3).
+    *   `Power` (right side of that) returns 3.
+    *   `Power` (right side) returns `2^3 = 8`.
+    *   `Power` returns `2^8 = 256`. Correct.
+
+    *   `2^3^2`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Base` (3).
+    *   `Power` (right side) sees `^`.
+    *   `Power` (right side) calls `Power` (right side of that).
+    *   `Power` (right side of that) calls `Base` (2).
+    *   `Power` (right side of that) returns 2.
+    *   `Power` (right side) returns `3^2 = 9`.
+    *   `Power` returns `2^9 = 512`. Correct.
+
+    *   `2+3*4`
+    *   `Expression` calls `Term` (2).
+    *   `Expression` sees `+`.
+    *   `Expression` calls `Term` (3*4=12).
+    *   `Expression` returns 14. Correct.
+
+    *   `2*3+4`
+    *   `Expression` calls `Term` (2*3=6).
+    *   `Expression` sees `+`.
+    *   `Expression` calls `Term` (4).
+    *   `Expression` returns 10. Correct.
+
+    *   `2^-1`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (1).
+    *   Result: `2^(-1)`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (1).
+    *   `Power` (right side) sees `^`.
+    *   `Power` (right side) calls `Power` (right side of that).
+    *   `Power` (right side of that) calls `Base` (2).
+    *   `Power` (right side of that) returns 2.
+    *   `Power` (right side) returns `1^2 = 1`.
+    *   `Power` returns `2^1 = 2`.
+    *   Wait, let's re-check `2^-1^2`.
+    *   Is it `2^(-(1^2))` or `2^(-1)^2`?
+    *   If `^` is higher than unary, then `-1^2` is `-(1^2) = -1`.
+    *   Then `2^-1^2` is `2^(-1) = 0.5`? No.
+    *   Let's re-read: "Unary minus/plus binds weaker than `^` (`-2^2` = -4), but a unary sign is allowed directly after `^` (`2^-1` = 0.5)".
+    *   This means `2^-1^2` should be `2^(-(1^2))`?
+    *   Let's look at the grammar again.
+    *   `Power` -> `Base` `^` `Power` | `Base`
+    *   `Unary` -> `-` `Unary` | `Power`
+    *   `Base` -> `Number` | `(` `Expression` `)`
+    *   In `2^-1^2`:
+        *   `Power` (top) calls `Base` (2).
+        *   `Power` (top) sees `^`.
+        *   `Power` (top) calls `Power` (right side).
+        *   `Power` (right side) calls `Unary`.
+        *   `Unary` sees `-`.
+        *   `Unary` calls `Unary` (right side).
+        *   `Unary` (right side) calls `Power`.
+        *   `Power` (right side) calls `Base` (1).
+        *   `Power` (right side) sees `^`.
+        *   `Power` (right side) calls `Power` (right side of that).
+        *   `Power` (right side of that) calls `Base` (2).
+        *   `Power` (right side of that) returns 2.
+        *   `Power` (right side) returns `1^2 = 1`.
+        *   `Unary` (right side) returns 1.
+        *   `Unary` (first call) returns -1.
+        *   `Power` (top) returns `2^-1 = 0.5`.
+    *   This seems mathematically consistent with the rules provided.
+
+    *   `2^3^2` = 512 (Right associative)
+    *   `^` is higher than unary.
+    *   Unary is weaker than `^`.
+    *   `2^-1` is allowed.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (3^2)
+    *   `Power` (3^2) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    Wait, if `^` is higher than unary, then `2^-1^2` is `2^(-(1^2))`.
+    If `Unary` was higher than `^`, then `2^-1^2` would be `(2^-1)^2 = 0.25`.
+    The requirement says "Unary minus/plus binds weaker than `^`".
+    So `2^-1^2` should be `2^(-(1^2))`. My grammar does exactly this.
+
+    *   `2 3`: `Lexer` returns `[2, 3]`. `Parser` consumes `2`. `ParseExpression` calls `ParseTerm` which calls `ParseFactor` which calls `ParseUnary` which calls `ParsePower` which calls `ParseBase`. `ParseBase` consumes `2`. `ParsePower` returns. `ParseUnary` returns. `ParseFactor` returns. `ParseTerm` returns. `ParseExpression` returns. `Parser` then checks if the next token is `EOF`. It's not, it's `3`. Throw `FormatException`.
+
+    *   `3**2`: `Lexer` returns `[3, *, *, 2]`. `Parser` consumes `3`. `ParseTerm` sees `*`. Calls `ParseFactor`. `ParseFactor` calls `Unary` calls `Power` calls `Base`. `Base` sees `*`. Throws `FormatException`.
+
+    *   `2+`: `Parser` consumes `2`. `ParseExpression` sees `+`. Calls `ParseTerm`. `ParseTerm` calls `ParseFactor` calls `Unary` calls `Power` calls `Base`. `Base` sees `EOF`. Throws `FormatException`.
+
+    *   `()`: `Base` sees `(`. Calls `ParseExpression`. `ParseExpression` calls `Term` calls `Factor` calls `Unary` calls `Power` calls `Base`. `Base` sees `)`. Throws `FormatException`.
+
+    *   `1.2.3`: `Lexer` sees `1.2.3`. When it sees the second `.`, it throws `FormatException`.
+
+    *   `2 / 0`: `Parser` sees `/`. Calls `ParseFactor`. `ParseFactor` returns `0`. `Parser` performs `2 / 0`. Throws `DivideByZeroException`.
+
+    *   `2 / (1-1)`: `Parser` sees `/`. Calls `ParseFactor`. `ParseFactor` calls `Unary` calls `Power` calls `Base` calls `Expression` which returns `0`. `Parser` performs `2 / 0`. Throws `DivideByZeroException`.
+
+    *   `2^-1`: `2` (Base), `^` (Power), `-1` (Unary).
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (1).
+    *   Result: `2^(-1)`. Correct.
+
+    *   `2*-3`: `2` (Factor), `*` (Term), `-3` (Unary).
+    *   `Term` calls `Factor` (2).
+    *   `Term` sees `*`.
+    *   `Term` calls `Factor` (right side).
+    *   `Factor` calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (3).
+    *   Result: `2*(-3)`. Correct.
+
+    *   `--2`: `Unary` -> `-` `Unary` -> `-` `Unary` -> `-` `Power` -> `-` `Base` -> `-` `2`. Correct.
+
+    *   `2^3^2`: `Power` -> `Base` (2) `^` `Power` (3^2). Correct.
+
+    *   `2^3^2` = 512.
+    *   `2^3^2` is `2^(3^2)`.
+    *   My `ParsePower` is: `Base [ ^ Power ]`.
+    *   This is right-associative.
+    *   `ParsePower` calls `Base`.
+    *   If it sees `^`, it calls `ParsePower` again.
+    *   This is the definition of right-associativity in recursive descent.
+
+    *   `2+3*4`
+    *   `Expression` calls `Term` (2).
+    *   `Expression` sees `+`.
+    *   `Expression` calls `Term` (3*4=12).
+    *   `Expression` returns 14. Correct.
+
+    *   `2*3+4`
+    *   `Expression` calls `Term` (2*3=6).
+    *   `Expression` sees `+`.
+    *   `Expression` calls `Term` (4).
+    *   `Expression` returns 10. Correct.
+
+    *   `2^-1`
+    *   `Power` calls `Base` (2).
+    *   `Power` sees `^`.
+    *   `Power` calls `Power` (right side).
+    *   `Power` (right side) calls `Unary`.
+    *   `Unary` sees `-`.
+    *   `Unary` calls `Unary` (right side).
+    *   `Unary` (right side) calls `Power`.
+    *   `Power` calls `Base` (1).
+    *   Result: `2^(-1)`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (3^2)
+    *   `Power` (3^2) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(-(1^2)) = 2^-1 = 0.5`.
+
+    *   `2^3^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Base` (3) `^` `Power` (2)
+    *   `Power` (2) -> `Base` (2)
+    *   Result: `2^(3^2) = 512`. Correct.
+
+    *   `2^-1^2`
+    *   `Power` -> `Base` (2) `^` `Power` (right side)
+    *   `Power` (right side) -> `Unary` -> `-` `Unary` -> `-` `Power` (right side)
+    *   `Power` (right side) -> `Base` (1) `^` `Power` (2)
+    

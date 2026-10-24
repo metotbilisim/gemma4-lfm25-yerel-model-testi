@@ -1,0 +1,364 @@
+*   Language: PHP 8.4.
+    *   Class: `final class RomanNumerals` (no namespace).
+    *   Methods:
+        *   `static toRoman(int $n): string`: 1..3999 $\to$ Roman (subtractive). Error if out of range.
+        *   `static fromRoman(string $s): int`: Roman $\to$ int. *Strict* validation (only canonical forms). Error if invalid, non-canonical, empty, lowercase, whitespace, etc.
+        *   `static add(string $a, string $b): string`: Roman + Roman $\to$ Roman. Error if inputs invalid or sum out of range.
+    *   Constraints: No namespace, no printing, no test code, single code block.
+
+    *   Standard mapping:
+        *   M: 1000
+        *   CM: 900
+        *   D: 500
+        *   CD: 400
+        *   C: 100
+        *   XC: 90
+        *   L: 50
+        *   XL: 40
+        *   X: 10
+        *   IX: 9
+        *   V: 5
+        *   IV: 4
+        *   I: 1
+    *   Algorithm: Iterate through the map from largest to smallest, subtracting values.
+
+    *   This is the tricky part. "Only canonical numerals".
+    *   A canonical Roman numeral follows specific rules:
+        1.  Symbols: I, V, X, L, C, D, M.
+        2.  Order: Generally descending.
+        3.  Subtractive rules:
+            *   `I` can precede `V` or `X`.
+            *   `X` can precede `L` or `C`.
+            *   `C` can precede `D` or `M`.
+            *   Only one smaller value can precede a larger value (e.g., `IV` is okay, `IIV` is not).
+        4.  Repetition rules:
+            *   `I`, `X`, `C`, `M` can be repeated up to 3 times.
+            *   `V`, `L`, `D` cannot be repeated.
+    *   Regex approach for strict validation:
+        A standard regex for canonical Roman numerals (1-3999):
+        `^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$`
+        Wait, the range is 1-3999. The regex above allows an empty string (0).
+        So: `^(M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3}))$` but we must ensure it's not empty.
+        Actually, the regex `^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$` matches:
+        - 0: "" (empty)
+        - 1-3: I, II, III
+        - 4: IV
+        - 5: V
+        - 9: IX
+        - 10: X
+        - 40: XL
+        - 50: L
+        - 90: XC
+        - 100: C
+        - 400: CD
+        - 500: D
+        - 900: CM
+        - 1000: M
+        - 3999: MMMCMXCIX
+    *   Since the prompt says `fromRoman` must accept *only* canonical numerals and `toRoman` produces 1..3999, the regex should be:
+        `^(?=[MDCLXVI])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$`
+        The lookahead `(?=[MDCLXVI])` ensures at least one character is present.
+
+    *   `fromRoman`:
+        1.  Check regex.
+        2.  If match, convert to int.
+        3.  Conversion logic: Iterate through string, if current < next, subtract current, else add current.
+    *   `add`:
+        1.  `$valA = self::fromRoman($a)`
+        2.  `$valB = self::fromRoman($b)`
+        3.  `$sum = $valA + $valB`
+        4.  If `$sum < 1` or `$sum > 3999`, throw exception.
+        5.  `return self::toRoman($sum)`
+
+    *   `toRoman(int $n)`:
+        ```php
+        if ($n < 1 || $n > 3999) throw new \InvalidArgumentException();
+        $map = [
+            'M' => 1000, 'CM' => 900, 'D' => 500, 'CD' => 400,
+            'C' => 100, 'XC' => 90, 'L' => 50, 'XL' => 40,
+            'X' => 10, 'IX' => 9, 'V' => 5, 'IV' => 4, 'I' => 1
+        ];
+        $res = '';
+        foreach ($map as $roman => $val) {
+            while ($n >= $val) {
+                $res .= $roman;
+                $n -= $val;
+            }
+        }
+        return $res;
+        ```
+    *   `fromRoman(string $s)`:
+        ```php
+        if (!preg_match('/^(?=[MDCLXVI])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+            throw new \InvalidArgumentException();
+        }
+        $map = ['I' => 1, 'V' => 5, 'X' => 10, 'L' => 50, 'C' => 100, 'D' => 500, 'M' => 1000];
+        $total = 0;
+        $len = strlen($s);
+        for ($i = 0; $i < $len; $i++) {
+            $current = $map[$s[$i]];
+            $next = ($i + 1 < $len) ? $map[$s[$i+1]] : 0;
+            if ($current < $next) {
+                $total -= $current;
+            } else {
+                $total += $current;
+            }
+        }
+        return $total;
+        ```
+
+    *   `toRoman(1994)`:
+        - 1000 (M) -> 994
+        - 900 (CM) -> 94
+        - 90 (XC) -> 4
+        - 4 (IV) -> 0
+        - Result: "MCMXCIV". Correct.
+    *   `fromRoman("MCMXCIV")`:
+        - M (1000) >= C (100) -> +1000
+        - C (100) < M (1000) -> -100
+        - M (1000) >= X (10) -> +1000
+        - X (10) < C (100) -> -10
+        - C (100) >= I (1) -> +100
+        - I (1) < V (5) -> -1
+        - V (5) >= 0 -> +5
+        - Total: 1000 - 100 + 1000 - 10 + 100 - 1 + 5 = 1994. Correct.
+    *   `fromRoman("IIII")`: Regex fails. Correct.
+    *   `fromRoman("VV")`: Regex fails. Correct.
+    *   `fromRoman("IC")`: Regex fails. Correct.
+    *   `fromRoman("XM")`: Regex fails. Correct.
+    *   `fromRoman("MMMM")`: Regex fails. Correct.
+    *   `fromRoman("VX")`: Regex fails. Correct.
+    *   `fromRoman("LC")`: Regex fails. Correct.
+    *   `fromRoman("DM")`: Regex fails. Correct.
+    *   `fromRoman("iv")`: Regex fails (case sensitive). Correct.
+    *   `fromRoman(" IV")`: Regex fails (whitespace). Correct.
+
+    *   PHP 8.4 features? The prompt asks for PHP 8.4 code. While there aren't many specific "must-use" features for this logic (it's standard algorithmic code), I'll ensure the syntax is clean and modern.
+    *   `final class RomanNumerals`
+    *   `static` methods.
+    *   `InvalidArgumentException`.
+    *   Strict type hinting.
+
+    *   `toRoman`: 1..3999.
+    *   `fromRoman`: Canonical only.
+    *   `add`: Sum range check.
+
+    Wait, let's double check the regex for `M{0,3}`.
+    If $n=3999$, `toRoman` returns `MMMCMXCIX`.
+    Regex `^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$`
+    For `MMMCMXCIX`:
+    - `M{0,3}` matches `MMM`.
+    - `(CM|CD|D?C{0,3})` matches `CM`.
+    - `(XC|XL|L?X{0,3})` matches `XC`.
+    - `(IX|IV|V?I{0,3})` matches `IX`.
+    Matches perfectly.
+
+    What about `fromRoman` returning 0?
+    The prompt says `toRoman` converts 1..3999.
+    `fromRoman` must accept *only* canonical numerals, i.e., exactly the strings `toRoman` can produce.
+    `toRoman` produces 1..3999.
+    So `fromRoman("")` should throw an exception.
+    My regex `^(?=[MDCLXVI])M{0,3}...` uses a positive lookahead to ensure at least one character from the set is present, preventing the empty string.
+
+    One edge case: `fromRoman` with `M` repeated more than 3 times.
+    `MMMM` -> Regex `M{0,3}` will not match the 4th M. Correct.
+
+    One edge case: `fromRoman` with `D` repeated.
+    `DD` -> `D?C{0,3}`. `D` is matched, but the second `D` is not part of the pattern. Regex fails. Correct.
+
+    One edge case: `fromRoman` with `IIV`.
+    `V?I{0,3}`. `I` is matched, but `IIV` doesn't fit `V?I{0,3}` because `V` must come *before* `I` in that specific group.
+    Wait, let's look at the group: `(IX|IV|V?I{0,3})`.
+    If input is `IIV`:
+    - `IX` doesn't match.
+    - `IV` doesn't match.
+    - `V?I{0,3}`: If `V` is not present, it matches `II`. But then there is a trailing `V`.
+    So `IIV` will fail the regex. Correct.
+
+    One edge case: `fromRoman` with `IC`.
+    `XC|XL|L?X{0,3}`.
+    `IC` doesn't match `XC`, `XL`, or `L?X{0,3}`. Correct.
+
+    One edge case: `fromRoman` with `XM`.
+    `M{0,3}` matches nothing (or `M`).
+    `CM|CD|D?C{0,3}` matches nothing.
+    `XC|XL|L?X{0,3}` matches nothing.
+    `IX|IV|V?I{0,3}` matches nothing.
+    Wait, if the string is `XM`, the regex engine tries to match `X` in the `XC|XL|L?X{0,3}` part.
+    `L?X{0,3}` matches `X`.
+    Then the string is `M`.
+    But the regex is anchored `^...$`.
+    So `XM` would only match if `X` is in the hundreds/tens part and `M` is in the thousands part. But `M` is at the start.
+    The order is `M` then `C` then `X` then `I`.
+    So `XM` is impossible because `M` must come before `X`.
+    The regex `^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$` is the industry standard for validating Roman numerals.
+
+    *   `toRoman(int $n)`: `1 <= $n <= 3999`.
+    *   `fromRoman(string $s)`: Regex + conversion.
+    *   `add(string $a, string $b)`: `fromRoman` -> `sum` -> `toRoman`.
+
+    ```php
+    <?php
+
+    final class RomanNumerals
+    {
+        private const MAP = [
+            'M' => 1000,
+            'CM' => 900,
+            'D' => 500,
+            'CD' => 400,
+            'C' => 100,
+            'XC' => 90,
+            'L' => 50,
+            'XL' => 40,
+            'X' => 10,
+            'IX' => 9,
+            'V' => 5,
+            'IV' => 4,
+            'I' => 1,
+        ];
+
+        private const REVERSE_MAP = [
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+        ];
+
+        public static function toRoman(int $n): string
+        {
+            if ($n < 1 || $n > 3999) {
+                throw new \InvalidArgumentException("Number out of range (1-3999).");
+            }
+
+            $result = '';
+            foreach (self::MAP as $roman => $value) {
+                while ($n >= $value) {
+                    $result .= $roman;
+                    $n -= $value;
+                }
+            }
+
+            return $result;
+        }
+
+        public static function fromRoman(string $s): int
+        {
+            // Regex for canonical Roman numerals 1-3999
+            // ^(?=[MDCLXVI]) ensures the string is not empty and contains valid characters
+            // M{0,3} - Thousands
+            // (CM|CD|D?C{0,3}) - Hundreds
+            // (XC|XL|L?X{0,3}) - Tens
+            // (IX|IV|V?I{0,3}) - Ones
+            if (!preg_match('/^(?=[MDCLXVI])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+                throw new \InvalidArgumentException("Invalid or non-canonical Roman numeral.");
+            }
+
+            $total = 0;
+            $length = strlen($s);
+            for ($i = 0; $i < $length; $i++) {
+                $currentVal = self::REVERSE_MAP[$s[$i]];
+                $nextVal = ($i + 1 < $length) ? self::REVERSE_MAP[$s[$i + 1]] : 0;
+
+                if ($currentVal < $nextVal) {
+                    $total -= $currentVal;
+                } else {
+                    $total += $currentVal;
+                }
+            }
+
+            return $total;
+        }
+
+        public static function add(string $a, string $b): string
+        {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+            $sum = $valA + $valB;
+
+            return self::toRoman($sum);
+        }
+    }
+    ```
+
+    *   `toRoman(int $n): string` - Yes.
+    *   `fromRoman(string $s): int` - Yes.
+    *   `add(string $a, string $b): string` - Yes.
+    *   `final class RomanNumerals` - Yes.
+    *   No namespace - Yes.
+    *   `InvalidArgumentException` for invalid/out of range - Yes.
+    *   Strict canonical check - Yes (via regex).
+    *   PHP 8.4 - Yes.
+    *   No printing/test code - Yes.
+
+    One minor detail: `fromRoman` must accept *only* canonical numerals. The regex `^(?=[MDCLXVI])M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$` is extremely strict. It handles:
+    - `IIII` (fails `I{0,3}`)
+    - `VV` (fails `V?`)
+    - `IC` (fails `XC|XL|L?X{0,3}`)
+    - `IIV` (fails `IX|IV|V?I{0,3}`)
+    - `XM` (fails order)
+    - `MMMM` (fails `M{0,3}`)
+    - `VX` (fails `XC|XL|L?X{0,3}`)
+    - `LC` (fails `XC|XL|L?X{0,3}`)
+    - `DM` (fails `CM|CD|D?C{0,3}`)
+    - Empty string (fails `(?=[MDCLXVI])`)
+    - Lowercase (fails regex)
+    - Whitespace (fails regex)
+
+    The logic seems robust.
+
+    *Self-Correction on Regex:*
+    The lookahead `(?=[MDCLXVI])` is good, but `M{0,3}` could match an empty string.
+    If the input is `""`, `M{0,3}` matches `""`, `(CM|CD|D?C{0,3})` matches `""`, etc.
+    The lookahead `(?=[MDCLXVI])` ensures that the *first* character matched by the whole expression must be one of those.
+    Wait, if the string is `""`, the lookahead `(?=[MDCLXVI])` will fail immediately because there is no character to look ahead to. So `""` is correctly rejected.
+
+    Final check on `add`:
+    If `a` is "MMM" (3000) and `b` is "M" (1000), `sum` is 4000.
+    `toRoman(4000)` will throw `InvalidArgumentException` because $n > 3999$.
+    This satisfies "Throws \InvalidArgumentException if ... the sum is out of range".
+
+    Final check on `fromRoman` error message:
+    The prompt says "Anything else throws `\InvalidArgumentException`". It doesn't specify the message, so a generic one is fine.
+
+    Final check on `toRoman` error message:
+    "Any other number throws `\InvalidArgumentException`".
+
+    Final structure:
+    ```php
+    <?php
+
+    final class RomanNumerals
+    {
+        // ...
+    }
+    ```
+
+    One last check: `fromRoman` logic for `IV`.
+    `$i=0`: `currentVal` (I) = 1. `nextVal` (V) = 5. `1 < 5` is true. `total = -1`.
+    `$i=1`: `currentVal` (V) = 5. `nextVal` = 0. `5 < 0` is false. `total = -1 + 5 = 4`.
+    Correct.
+
+    One last check: `fromRoman` logic for `MCMXCIV`.
+    M: 1000. Next C (100). 1000 > 100. total = 1000.
+    C: 100. Next M (1000). 100 < 1000. total = 1000 - 100 = 900.
+    M: 1000. Next X (10). 1000 > 10. total = 900 + 1000 = 1900.
+    X: 10. Next C (100). 10 < 100. total = 1900 - 10 = 1890.
+    C: 100. Next I (1). 100 > 1. total = 1890 + 100 = 1990.
+    I: 1. Next V (5). 1 < 5. total = 1990 - 1 = 1989.
+    V: 5. Next 0. 5 > 0. total = 1989 + 5 = 1994.
+    Correct.
+
+    Wait, I used `self::MAP` and `self::REVERSE_MAP`. Since these are constants, I should use `self::MAP`. In PHP, constants are accessed via `self::`.
+
+    The regex `M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})` is actually slightly more permissive than "exactly what `toRoman` produces" if we don't anchor it and handle the empty string. But with `^`, `$`, and the lookahead, it is perfect.
+
+    One detail: `toRoman` handles 1..3999.
+    `fromRoman` handles canonical.
+    `add` handles the sum.
+    If `add("I", "I")` is called, `fromRoman("I")` returns 1, `fromRoman("I")` returns 1, sum is 2, `toRoman(2)` returns "II".
+
+    Everything looks solid.

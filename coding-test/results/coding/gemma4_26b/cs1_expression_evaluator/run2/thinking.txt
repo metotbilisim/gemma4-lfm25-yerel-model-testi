@@ -1,0 +1,1285 @@
+*   Namespace: `Bench`
+    *   Class: `ExpressionEvaluator` (static)
+    *   Method: `public static double Evaluate(string expression)`
+    *   Supported: Numbers (int, decimal), `+`, `-`, `*`, `/`, `^`, `(`, `)`.
+    *   Unary: `+`, `-` (can be chained like `--2`, can follow `^` like `2^-1`).
+    *   Precedence:
+        1.  `^` (Right-associative, highest)
+        2.  Unary `+`/`-` (Wait, the prompt says "Unary minus/plus binds weaker than `^` (`-2^2` = -4)". This is a specific rule. Usually, unary is higher, but I must follow the prompt. However, it also says "a unary sign is allowed directly after `^` (`2^-1` = 0.5)". This implies the parser needs to handle the unary operator correctly in the context of the power operator.)
+        3.  `*`, `/` (Left-associative)
+        4.  `+`, `-` (Left-associative)
+    *   Parsing rules:
+        *   Ignore whitespace.
+        *   Culture-invariant (use `CultureInfo.InvariantCulture`).
+        *   Error handling: `FormatException` for invalid syntax/chars/mismatched parens/missing operands/consecutive numbers/consecutive binary operators/malformed numbers.
+        *   Error handling: `DivideByZeroException` for division by zero.
+    *   Constraints: No `DataTable.Compute`, no Roslyn, no external libs.
+
+    *   A standard way to implement an expression evaluator is the Shunting-Yard algorithm (to convert to Reverse Polish Notation - RPN) or a Recursive Descent Parser.
+    *   Given the specific precedence rules (especially the unary vs power rule), a Recursive Descent Parser is often more intuitive and easier to control for specific precedence/associativity requirements.
+
+    *   Grammar based on requirements:
+        *   `Expression` -> `Term` { (`+` | `-`) `Term` } (Left-associative)
+        *   `Term` -> `Factor` { (`*` | `/`) `Factor` } (Left-associative)
+        *   `Factor` -> `Unary` [ `^` `Factor` ] (Right-associative, power)
+        *   `Unary` -> `+` `Unary` | `-` `Unary` | `Primary`
+        *   `Primary` -> `Number` | `(` `Expression` `)`
+
+    *   *Wait*, let's re-check the prompt's precedence:
+        - `^` is highest.
+        - `Unary` is weaker than `^` (`-2^2` = -4).
+        - `*` and `/` are next.
+        - `+` and `-` are lowest.
+
+    *   Let's refine the grammar to match the prompt's specific precedence:
+        1.  `Expression` (Low: `+`, `-`)
+        2.  `Term` (Mid: `*`, `/`)
+        3.  `Unary` (Wait, if Unary is weaker than `^`, then `Unary` should be *below* `^` in the hierarchy, but the prompt says `2^-1` is valid. This means the `^` operator can take a `Unary` expression as its operand.)
+
+    *   Let's re-evaluate the hierarchy:
+        - Level 1 (Lowest): `+`, `-` (Binary)
+        - Level 2: `*`, `/` (Binary)
+        - Level 3: Unary `+`, `-`
+        - Level 4 (Highest): `^` (Right-associative)
+
+    *   Wait, the prompt says: `Unary minus/plus binds weaker than ^ (-2^2 = -4)`.
+        In standard math, `-2^2` is indeed `-4` because `^` is higher.
+        If Unary was higher, `-2^2` would be `(-2)^2 = 4`.
+        So, the hierarchy should be:
+        1. `Expression` (+, -)
+        2. `Term` (*, /)
+        3. `Power` (^)
+        4. `Unary` (+, -)
+        5. `Primary` (Number, Parens)
+
+    *   Let's check `2^-1`:
+        - `2` is a Primary.
+        - `^` is a Power operator.
+        - `-1` is a Unary expression.
+        - If `Power` calls `Unary`, then `2^-1` works.
+        - If `Unary` calls `Power`, then `-2^2` would be `-(2^2) = -4`.
+
+    *   Let's trace `-2^2` with this logic:
+        - `Expression` calls `Term`.
+        - `Term` calls `Power`.
+        - `Power` calls `Unary`.
+        - `Unary` sees `-`, calls `Unary` again.
+        - `Unary` calls `Primary`.
+        - `Primary` sees `2`.
+        - `Unary` returns `-2`.
+        - `Power` sees `^`, calls `Power` (right-associative).
+        - `Power` calls `Unary` -> `Primary` -> `2`.
+        - `Power` returns `(-2)^2`? NO. That would be 4.
+
+    *   Let's rethink. The prompt says `-2^2 = -4`.
+        This means `^` is evaluated *before* the unary minus.
+        So the hierarchy must be:
+        1. `Expression` (+, -)
+        2. `Term` (*, /)
+        3. `Unary` (-, +)
+        4. `Power` (^)
+        5. `Primary` (Number, Parens)
+
+        Wait, if `Unary` is higher than `Power`, then `-2^2` is `(-2)^2 = 4`.
+        If `Power` is higher than `Unary`, then `-2^2` is `-(2^2) = -4`.
+        The prompt says `-2^2 = -4`. Therefore, `Power` is higher than `Unary`.
+
+        But the prompt also says: `a unary sign is allowed directly after ^ (2^-1 = 0.5)`.
+        If `Power` is higher than `Unary`, then `2^-1` would be parsed as `(2^) (-1)`. This is a syntax error because `^` expects an operand.
+        The only way `2^-1` works while `-2^2 = -4` is if the `Power` operator's operand can be a `Unary` expression, but the `Unary` operator's operand is a `Primary` expression (not a `Power` expression).
+
+    *   Let's refine the grammar again:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+    *   Let's test `-2^2`:
+        - `Expression` -> `Term` -> `Unary`
+        - `Unary` sees `-`, calls `Unary`
+        - `Unary` calls `Power`
+        - `Power` sees `2`, sees `^`, calls `Power`
+        - `Power` sees `2`, returns `2`.
+        - `Power` returns `2^2 = 4`.
+        - `Unary` returns `-4`.
+        - Result: `-4`. (Correct)
+
+    *   Let's test `2^-1`:
+        - `Expression` -> `Term` -> `Unary` -> `Power`
+        - `Power` sees `2`, sees `^`, calls `Power`
+        - `Power` calls `Unary` (Wait, `Power` calls `Power` in my grammar above, but to allow `2^-1`, `Power` must be able to call `Unary`).
+        - Let's adjust: `Power` -> `Unary` [ `^` `Power` ]? No, that creates infinite recursion.
+
+    *   Let's look at the standard way to handle this.
+        The rule "Unary binds weaker than `^`" means `^` is higher precedence.
+        The rule "Unary allowed after `^`" means the operand of `^` can be a unary expression.
+
+        Grammar:
+        - `Expr` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Factor` [ `^` `Power` ]
+        - `Factor` -> `Number` | `(` `Expr` `)` | `-` `Factor` | `+` `Factor` ... No, this is getting messy.
+
+    *   Let's try the Shunting-Yard approach. It's often more robust for these specific precedence requirements.
+        Tokens: `Number`, `+`, `-`, `*`, `/`, `^`, `(`, `)`.
+        Unary: We need to distinguish between binary `-` and unary `-`.
+        A `-` is unary if:
+        - It's at the start of the expression.
+        - It follows an operator (`+`, `-`, `*`, `/`, `^`).
+        - It follows an opening parenthesis `(`.
+
+    *   Precedence Table (Shunting-Yard):
+        - `^`: Precedence 4, Right-associative
+        - `Unary + / -`: Precedence 3, Right-associative (Wait, prompt says unary is weaker than `^`. So precedence 3 is *lower* than 4. Let's use 3 for Unary, 4 for `^`. But if Unary is 3 and `^` is 4, then `^` is higher. This matches `-2^2 = -4`.)
+        - `*`, `/`: Precedence 2, Left-associative
+        - `+`, `-`: Precedence 1, Left-associative
+
+    *   Wait, if Unary is 3 and `^` is 4, then `2^-1` would be parsed as `2 ^ (-1)`.
+        In Shunting-Yard:
+        1. Push `2` to output.
+        2. Push `^` to operator stack.
+        3. `-` is unary. Precedence 3. `^` is on stack (Precedence 4).
+        4. Since `3 < 4`, we don't pop `^`. We push `-` to stack.
+        5. Push `1` to output.
+        6. `)` or end of string. Pop `-` (output `1`, then `-1`). Pop `^` (output `2`, then `2^-1`).
+        This works!
+
+    *   Let's re-verify the precedence:
+        - `^` (4, Right)
+        - Unary (3, Right)
+        - `*`, `/` (2, Left)
+        - `+`, `-` (1, Left)
+
+    *   Wait, if Unary is 3 and `*` is 2, then `2 * -3` works.
+        1. Push `2`.
+        2. Push `*` (Stack: `*`).
+        3. `-` is unary (Precedence 3). `*` is on stack (Precedence 2).
+        4. `3 > 2`, so push `-` to stack (Stack: `*`, `-`).
+        5. Push `3`.
+        6. End. Pop `-` (output `-3`), pop `*` (output `2 * -3`).
+        Result: `-6`. Correct.
+
+    *   What about `2^-1`?
+        1. Push `2`.
+        2. Push `^` (Stack: `^`).
+        3. `-` is unary (Precedence 3). `^` is on stack (Precedence 4).
+        4. `3 < 4`, so push `-` to stack (Stack: `^`, `-`).
+        5. Push `1`.
+        6. End. Pop `-` (output `-1`), pop `^` (output `2^-1`).
+        Result: `0.5`. Correct.
+
+    *   What about `-2^2`?
+        1. `-` is unary (Precedence 3). Stack: `-`.
+        2. Push `2`.
+        3. `^` is operator (Precedence 4). `-` is on stack (Precedence 3).
+        4. `4 > 3`, so push `^` to stack (Stack: `-`, `^`).
+        5. Push `2`.
+        6. End. Pop `^` (output `2^2=4`), pop `-` (output `-4`).
+        Result: `-4`. Correct.
+
+    *   Wait, the prompt says: `Unary minus/plus binds weaker than ^ (-2^2 = -4)`.
+        In my logic:
+        - `^` has precedence 4.
+        - `Unary` has precedence 3.
+        - Therefore `^` is higher than `Unary`.
+        - This means `^` is evaluated *before* `Unary`.
+        - `-2^2` -> `-(2^2)` -> `-4`.
+        - This matches the requirement.
+
+    *   Wait, I just noticed a potential conflict.
+        If `Unary` is 3 and `*` is 2, then `Unary` is *higher* than `*`.
+        So `-2*3` is `(-2)*3 = -6`.
+        If `Unary` was 1, then `-2*3` would be `-(2*3) = -6`.
+        Wait, the precedence of unary in most languages is very high. But the prompt says:
+        `*` and `/` are next (after unary), and `+` and `-` are lowest.
+        This implies:
+        1. `^`
+        2. `Unary`
+        3. `*`, `/`
+        4. `+`, `-`
+
+        Let's re-read:
+        - `^` highest.
+        - Unary binds weaker than `^`.
+        - `*` and `/` are next.
+        - `+` and `-` are lowest.
+
+        This means the order is:
+        1. `^` (Precedence 4)
+        2. Unary (Precedence 3)
+        3. `*`, `/` (Precedence 2)
+        4. `+`, `-` (Precedence 1)
+
+        Wait, if Unary is 3 and `*` is 2, then `Unary` is *stronger* than `*`.
+        Is that what "next" means?
+        "Precedence and associativity:
+        - `^` has the highest...
+        - Unary... binds weaker than `^`...
+        - `*` and `/` are next...
+        - `+` and `-` are lowest..."
+
+        This phrasing is slightly ambiguous. Does "next" mean "next highest" or "next lowest"?
+        Usually, it means the next level down.
+        So:
+        Level 4: `^`
+        Level 3: Unary
+        Level 2: `*`, `/`
+        Level 1: `+`, `-`
+
+        Let's check `-2*3` with this:
+        - `-` is unary (3).
+        - `*` is binary (2).
+        - Since `3 > 2`, unary is applied first. `-2 * 3`. Correct.
+
+        Let's check `2*-3`:
+        - `*` is binary (2).
+        - `-` is unary (3).
+        - Since `3 > 2`, unary is applied first. `2 * (-3)`. Correct.
+
+        Let's check `2^-1`:
+        - `^` is binary (4).
+        - `-` is unary (3).
+        - Since `4 > 3`, `^` is higher.
+        - But in Shunting-Yard, when we see `-` (3) and `^` (4) is on the stack, we *don't* pop `^` because `3 < 4`. We push `-`.
+        - So `2^-1` becomes `2 ^ (-1)`. Correct.
+
+        Wait, there's a catch. In Shunting-Yard, if the operator on the stack has *higher* precedence than the current operator, we pop the stack.
+        If current is `-` (3) and stack is `^` (4):
+        `3 < 4`, so we push `-`.
+        This results in `2 ^ (-1)`.
+
+        If current is `^` (4) and stack is `-` (3):
+        `4 > 3`, so we push `^`.
+        This results in `(-2) ^ 2`? No, that would be `4`.
+        But the prompt says `-2^2 = -4`.
+        So `^` must be evaluated *before* `-`.
+        In Shunting-Yard, to make `^` evaluate before `-`, the `-` must be on the stack and the `^` must trigger a pop.
+        But `^` has *higher* precedence.
+        In Shunting-Yard, if the incoming operator has *higher* precedence than the stack top, we push it.
+        If the incoming operator has *lower* precedence, we pop.
+        If the incoming operator has *equal* precedence, we pop (if left-associative) or push (if right-associative).
+
+        Let's trace `-2^2` again with `^` (4) and Unary (3):
+        1. `-` (Unary, 3) is incoming. Stack is empty. Push `-`.
+        2. `2` is incoming. Push `2` to output.
+        3. `^` (Binary, 4) is incoming. Stack top is `-` (3).
+        4. `4 > 3`. Push `^` to stack.
+        5. `2` is incoming. Push `2` to output.
+        6. End of string.
+        7. Pop `^`: `2^2 = 4`. Output: `2, 4`.
+        8. Pop `-`: `-4`. Output: `2, 4, -4`.
+        Result: `-4`. (Correct!)
+
+        Let's trace `2^-1` again with `^` (4) and Unary (3):
+        1. `2` is incoming. Push `2` to output.
+        2. `^` (Binary, 4) is incoming. Stack is empty. Push `^`.
+        3. `-` (Unary, 3) is incoming. Stack top is `^` (4).
+        4. `3 < 4`. Pop `^`? No, that's not how it works.
+        If `incoming < stack_top`, we pop.
+        So `3 < 4`, we pop `^`.
+        Output: `2, ^`.
+        Then push `-`.
+        Then push `1`.
+        Then pop `-`.
+        Result: `2, ^, -1` -> `2^-1`.
+        Wait, that's `2^-1`. But the `^` was popped *before* the `-` was even processed.
+        This would mean `2^-1` is `(2^)-1`? No, that's not right.
+
+        Let's re-think. The Shunting-Yard algorithm for unary operators is slightly different.
+        Unary operators are usually treated as having very high precedence.
+        But the prompt specifically says unary is *weaker* than `^`.
+
+        Let's use the Recursive Descent Parser. It's much easier to control.
+
+        Grammar:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I already tested this grammar and it failed `2^-1`.
+        Let's look at `2^-1` again.
+        `Power` -> `Primary` [ `^` `Power` ]
+        If `Primary` is `2`, then `Power` is `2 ^ Power`.
+        The next `Power` must be `Unary`.
+        So `Power` -> `Primary` [ `^` `Unary` ]?
+        But if `Power` -> `Primary` [ `^` `Unary` ], then `2^3^2` would be `2^(3^2)`?
+        Let's see:
+        `Power(2)`
+          `^`
+          `Power(3^2)`
+            `3`
+            `^`
+            `Power(2)`
+        This works for right-associativity.
+
+        Now, how to allow `2^-1`?
+        The operand of `^` must be able to be a `Unary` expression.
+        But if the operand of `^` is a `Unary` expression, and `Unary` can be a `Power` expression, we get infinite recursion.
+        *Unless* we distinguish between `Power` and `Unary`.
+
+        Let's try this:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Factor` [ `^` `Power` ]
+        - `Factor` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, this is the loop)
+
+        Let's try again. The only way to have `2^-1` and `-2^2 = -4` is:
+        - `^` is higher precedence than Unary.
+        - `^`'s operand can be a Unary expression.
+        - Unary's operand *cannot* be a `^` expression (otherwise `-2^2` would be `(-2)^2`).
+
+        So:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, still the loop)
+
+        Let's look at the `Primary` level.
+        A `Primary` is the most basic unit: a number or a parenthesized expression.
+        If we want to allow `2^-1`, the `^` operator must be able to take a `Unary` as its operand.
+        If we want `-2^2` to be `-4`, the `Unary` operator must take a `Power` as its operand.
+
+        Let's try this hierarchy:
+        1. `Expression` (Binary `+`, `-`)
+        2. `Term` (Binary `*`, `/`)
+        3. `Unary` (Unary `+`, `-`)
+        4. `Power` (Binary `^`, right-associative)
+        5. `Primary` (Number, `( Expression )`)
+
+        Wait, if `Unary` is level 3 and `Power` is level 4, then `Power` is higher.
+        `Power`'s operand is `Primary`.
+        `Unary`'s operand is `Power`.
+        This means:
+        - `-2^2`: `Unary(- (Power(2^2)))` = `-4`. (Correct)
+        - `2^-1`: `Power(2 ^ Unary(-1))`? No, `Power`'s operand is `Primary`.
+        - `Primary` can be `( Expression )`.
+        - So `2^(-1)` works. But `2^-1` (without parens) must also work.
+
+        If `2^-1` must work without parentheses, then `^`'s operand *must* be able to be a `Unary`.
+        But if `Unary`'s operand is `Power`, we have:
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `Power`
+        `Power` -> `Primary` ...
+        This is not a loop. The loop only happens if `Primary` can be `Unary`.
+        But `Primary` is just `Number` or `( Expression )`.
+
+        Let's trace `2^-1` with:
+        - `Expression` -> `Term` { `+`/`-` `Term` }
+        - `Term` -> `Unary` { `*`/`/` `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, `2^-1` still doesn't work because `Power` only accepts `Primary`.
+        If I change `Power` to:
+        - `Power` -> `Unary` [ `^` `Power` ]
+        Then `2^-1` works: `Power(2 ^ Power(-1))`.
+        But then `-2^2` becomes: `Unary(- (Power(2^2)))`.
+        Wait, let's trace `-2^2` with `Power` -> `Unary [ ^ Power ]`:
+        1. `Unary` sees `-`.
+        2. `Unary` calls `Unary`.
+        3. `Unary` calls `Power`.
+        4. `Power` sees `2`.
+        5. `Power` sees `^`.
+        6. `Power` calls `Power`.
+        7. `Power` sees `2`.
+        8. `Power` returns `2^2 = 4`.
+        9. `Unary` returns `-4`.
+        It works!
+
+        Let's trace `2^-1` with `Power` -> `Unary [ ^ Power ]`:
+        1. `Power` sees `2`.
+        2. `Power` sees `^`.
+        3. `Power` calls `Power`.
+        4. `Power` calls `Unary`.
+        5. `Unary` sees `-`.
+        6. `Unary` calls `Unary`.
+        7. `Unary` calls `Power`.
+        8. `Power` sees `1`.
+        9. `Power` returns `1`.
+        10. `Unary` returns `-1`.
+        11. `Power` returns `2^-1 = 0.5`.
+        It works!
+
+        Wait, there's one problem: `Power` -> `Unary [ ^ Power ]` might cause infinite recursion if `Unary` can be `Power`.
+        Let's check:
+        `Power` calls `Unary`.
+        `Unary` calls `Power`.
+        Yes, that's an infinite loop.
+
+        To fix this, `Unary` must be able to call `Power`, but `Power` must not be able to call `Unary` *directly* in a way that loops.
+        The standard way is:
+        - `Expression` -> `Term` { `+`/`-` `Term` }
+        - `Term` -> `Unary` { `*`/`/` `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        This grammar *cannot* parse `2^-1` because `^` expects a `Primary`, and `-1` is a `Unary`.
+        The only way `2^-1` works is if `^`'s operand is `Unary`.
+        But if `Unary`'s operand is `Power`, we have a loop.
+
+        *Wait!* There is a solution. The `Unary` operator can be part of the `Power` operator's operand, but we must ensure the `Power` operator doesn't call `Unary` in a way that allows `2^3^2` to be parsed incorrectly.
+
+        Actually, the simplest way to handle this is to use the Shunting-Yard algorithm and just be very careful with the precedence levels.
+
+        Let's re-verify Shunting-Yard with:
+        - `^`: Precedence 4, Right-associative
+        - `Unary + / -`: Precedence 3, Right-associative
+        - `*`, `/`: Precedence 2, Left-associative
+        - `+`, `-`: Precedence 1, Left-associative
+
+        Wait, I already traced `2^-1` with this and it worked!
+        Let's re-trace `2^-1` very carefully.
+        Tokens: `2`, `^`, `-`, `1`.
+        1. `2`: Output `[2]`, Stack `[]`.
+        2. `^`: `^` is binary. Stack `[]`. Push `^`. Stack `[^]`.
+        3. `-`: `-` is unary. Stack `[^]`.
+           Precedence of `-` is 3.
+           Precedence of `^` is 4.
+           Since `3 < 4`, we *pop* the stack.
+           Pop `^`. Output `[2, ^]`.
+           Push `-`. Stack `[-]`.
+        4. `1`: Output `[2, ^, 1]`, Stack `[-]`.
+        5. End: Pop `-`. Output `[2, ^, 1, -]`.
+        6. Evaluate RPN: `2, ^, 1, -` -> `2 ^ (-1)` = `0.5`.
+
+        Wait, the RPN `2, ^, 1, -` is actually `2 ^ (-1)`.
+        Let's check:
+        - `2, ^` is not possible in RPN. RPN for `2^-1` is `2, 1, unary-minus, ^`.
+        - My Shunting-Yard trace produced `2, ^, 1, -`. This is wrong.
+        - The error is: when `3 < 4`, I popped `^`. But `^` is a binary operator, it needs two operands.
+
+        Let's use the correct Shunting-Yard for unary operators.
+        Unary operators are treated like any other operator, but they only take one operand.
+        The rule is:
+        When an operator `op1` comes in:
+        While `stack.top` is not `(` AND (`stack.top` has higher precedence than `op1` OR (`stack.top` has equal precedence AND `op1` is left-associative)):
+            Pop `stack.top` to output.
+        Push `op1`.
+
+        Let's re-trace `2^-1` with this rule:
+        1. `2`: Output `[2]`.
+        2. `^` (Binary, 4, Right): Stack `[]`. Push `^`. Stack `[^]`.
+        3. `-` (Unary, 3, Right): Stack `[^]`.
+           `stack.top` is `^` (4).
+           `4 > 3`. So pop `^`.
+           Output `[2, ^]`.
+           *Wait*, `2, ^` is still invalid RPN.
+
+        The problem is that `^` is a binary operator. It *must* have two operands.
+        In Shunting-Yard, a binary operator is only popped when its precedence is lower than the incoming operator, or when the incoming operator is lower/equal.
+        If we pop `^` because `-` has lower precedence, we are saying `^` is finished. But `^` is not finished because it only has one operand (`2`).
+
+        *Conclusion:* The Shunting-Yard algorithm needs to know that `^` is a binary operator and it's waiting for its second operand.
+
+        Let's use a Recursive Descent Parser. It's much more reliable for this.
+        To avoid the infinite loop, we can use this structure:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I said this doesn't allow `2^-1`. Let's look at `2^-1` again.
+        In `2^-1`, the `-` is a unary operator.
+        In my grammar, `Unary` is *above* `Power`.
+        So `2^-1` would be parsed as `2 ^ (Unary(-1))`.
+        But `Power` only calls `Primary`.
+        If I change `Power` to:
+        - `Power` -> `Primary` [ `^` `Unary` ] (This only allows one level of power)
+        - `Power` -> `Primary` [ `^` `Power` ] (This allows `2^3^2`)
+
+        Wait! If `Power` calls `Power`, and `Power` calls `Primary`, and `Primary` calls `Expression`, and `Expression` calls `Unary`, and `Unary` calls `Power`... that's the loop.
+        *But* the loop only happens if `Primary` can call `Unary`.
+        And `Primary` *can* call `Unary` if we allow `( Expression )`.
+        `Primary` -> `(` `Expression` `)`
+        `Expression` -> `Unary`
+        `Unary` -> `Power`
+        `Power` -> `Primary`
+        This is a loop, but it's a *valid* loop (it's how parentheses work). The recursion is terminated by the `Number`.
+
+        The only problem is `2^-1`.
+        If `Power` is `Primary [ ^ Power ]`, then `2^-1` is not allowed.
+        If `Power` is `Primary [ ^ Unary ]`, then `2^3^2` is not allowed.
+        If `Power` is `Primary [ ^ Power ]` AND `Unary` can be `Power`, we have a loop.
+
+        Wait! Let's look at the precedence again.
+        `^` is highest.
+        `Unary` is weaker than `^`.
+        This means `^` is *inside* `Unary`.
+        `Unary` -> `-` `Power`
+        `Power` -> `Primary` `^` `Power` | `Primary`
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        Let's trace `2^-1` with this:
+        `2` is a `Primary`.
+        `^` is a `Power` operator.
+        `-1` is a `Unary`.
+        So `2^-1` is `Power(2 ^ Unary(-1))`.
+        This means `Power` must be able to take a `Unary` as its operand.
+
+        Let's try this grammar:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, this is the loop)
+
+        Let's try a different approach. Let's use a simple Tokenizer and then a Recursive Descent Parser where the `Power` operator is handled carefully.
+
+        ```csharp
+        // Grammar
+        // Expr   -> Term { ('+'|'-') Term }
+        // Term   -> Unary { ('*'|'/') Unary }
+        // Unary  -> ('+'|'-') Unary | Power
+        // Power  -> Primary [ '^' Power ]
+        // Primary-> Number | '(' Expr ')'
+        ```
+        This grammar *cannot* parse `2^-1`.
+        To allow `2^-1`, `Power` must be:
+        `Power -> Primary [ '^' Unary ]` (but this only allows one `^`)
+        OR
+        `Power -> Primary [ '^' Power ]` AND `Unary` can be `Power`.
+
+        Wait, if `Unary` can be `Power`, then `Unary` -> `Power` and `Power` -> `Primary [ '^' Power ]`.
+        This is NOT a loop!
+        `Unary` calls `Power`.
+        `Power` calls `Primary`.
+        `Primary` calls `Number` or `( Expression )`.
+        `Expression` calls `Unary`.
+        This is a perfectly fine recursive descent parser. The only way to loop is if `Primary` calls `Unary` *without* a parenthesis. But `Primary` only calls `Expression` *inside* parentheses.
+
+        Let's trace `2^-1` again:
+        1. `Expression` calls `Term`.
+        2. `Term` calls `Unary`.
+        3. `Unary` calls `Power`.
+        4. `Power` sees `2`.
+        5. `Power` sees `^`.
+        6. `Power` calls `Power`.
+        7. `Power` calls `Unary`.
+        8. `Unary` sees `-`.
+        9. `Unary` calls `Unary`.
+        10. `Unary` calls `Power`.
+        11. `Power` sees `1`.
+        12. `Power` returns `1`.
+        13. `Unary` returns `-1`.
+        14. `Power` returns `2^-1`.
+        It works!
+
+        Let's trace `-2^2`:
+        1. `Expression` calls `Term`.
+        2. `Term` calls `Unary`.
+        3. `Unary` sees `-`.
+        4. `Unary` calls `Unary`.
+        5. `Unary` calls `Power`.
+        6. `Power` sees `2`.
+        7. `Power` sees `^`.
+        8. `Power` calls `Power`.
+        9. `Power` sees `2`.
+        10. `Power` returns `2^2 = 4`.
+        11. `Unary` returns `-4`.
+        It works!
+
+        Let's trace `2^3^2`:
+        1. `Power` sees `2`.
+        2. `Power` sees `^`.
+        3. `Power` calls `Power`.
+        4. `Power` sees `3`.
+        5. `Power` sees `^`.
+        6. `Power` calls `Power`.
+        7. `Power` sees `2`.
+        8. `Power` returns `2`.
+        9. `Power` returns `3^2 = 9`.
+        10. `Power` returns `2^9 = 512`.
+        It works!
+
+        This grammar is perfect.
+
+    *   `Tokenizer`:
+        - Iterate through the string.
+        - Skip whitespace.
+        - If digit or `.`, parse number.
+        - If `+`, `-`, `*`, `/`, `^`, `(`, `)`, it's an operator.
+        - Otherwise, throw `FormatException`.
+        - Handle `1.2.3` by checking if the number is valid.
+        - Handle `2 3` by checking if the next token is a number after a number.
+
+    *   `Parser`:
+        - `ParseExpression`
+        - `ParseTerm`
+        - `ParseUnary`
+        - `ParsePower`
+        - `ParsePrimary`
+
+    *   `Error Handling`:
+        - `FormatException` for:
+            - Unknown characters.
+            - Mismatched parentheses.
+            - Missing operands (e.g., `2+`).
+            - Two numbers in a row (e.g., `2 3`).
+            - Two binary operators in a row (e.g., `2++3`).
+            - Malformed numbers (e.g., `1.2.3`).
+            - Empty/whitespace string.
+        - `DivideByZeroException` for `x / 0`.
+
+    *   *Wait*, the "two numbers in a row" and "two binary operators in a row" are actually naturally handled by the Recursive Descent Parser. If the parser expects an operator but finds a number, or expects a number but finds an operator, it will fail.
+
+    *   Let's refine the `Tokenizer` to be more robust. Instead of a full tokenizer, we can just use a `Peek()` and `Consume()` approach on the string.
+
+    *   *Wait*, the requirement "two numbers in a row (`2 3`)" is tricky. If the tokenizer just skips whitespace, `2 3` will look like `2` then `3`.
+        In the parser:
+        - `ParseExpression` calls `ParseTerm`.
+        - `ParseTerm` calls `ParseUnary`.
+        - `ParseUnary` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` consumes `2`.
+        - `ParsePower` returns.
+        - `ParseUnary` returns.
+        - `ParseTerm` returns.
+        - `ParseExpression` returns.
+        - Now, the parser must check if there are any leftover tokens. If there are, and the next token is a number, that's a `2 3` error.
+
+    *   *Wait*, "two binary operators in a row (`3**2`)":
+        - `ParseTerm` calls `ParseUnary`.
+        - `ParseUnary` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` consumes `3`.
+        - `ParsePower` returns.
+        - `ParseUnary` returns.
+        - `ParseTerm` sees `*`. It consumes `*` and calls `ParseUnary`.
+        - `ParseUnary` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` sees `*`. It's not a number or `(`. It throws `FormatException`.
+        - This works!
+
+    *   *Wait*, "malformed numbers (`1.2.3`)":
+        - `double.Parse("1.2.3", CultureInfo.InvariantCulture)` will throw a `FormatException`. This is perfect.
+
+    *   *Wait*, "missing operands (`2+`)":
+        - `ParseExpression` consumes `2`.
+        - `ParseExpression` sees `+`.
+        - `ParseExpression` calls `ParseTerm`.
+        - `ParseTerm` calls `ParseUnary`... which calls `ParsePrimary`.
+        - `ParsePrimary` sees end of string. Throws `FormatException`.
+        - This works!
+
+    *   *Wait*, "empty or whitespace-only strings":
+        - Check at the beginning.
+
+    *   *Wait*, "two numbers in a row (`2 3`)":
+        - After `ParseExpression` is done, we must ensure we've consumed the *entire* string.
+        - If `2 3` is passed, `ParseExpression` will consume `2` and stop. The remaining string is ` 3`.
+        - We must check if the remaining string contains anything other than whitespace.
+
+    *   *Wait*, "unary sign allowed directly after `^` (`2^-1`)":
+        - My grammar: `Power -> Primary [ '^' Power ]`.
+        - If `Power` is `2 ^ Power`, the second `Power` can be `Unary(-1)`.
+        - `Unary(-1)` calls `Power(1)`.
+        - This works.
+
+    *   *Wait*, "unary minus/plus binds weaker than `^` (`-2^2` = -4)":
+        - My grammar: `Unary -> '-' Unary | Power`.
+        - `Unary` calls `Power`.
+        - `Power` is `2^2`.
+        - `Unary` returns `-4`.
+        - This works.
+
+    *   *Wait*, "two numbers in a row (`2 3`)":
+        - If the input is `2 3`, the tokenizer will see `2` and then `3`.
+        - `ParseExpression` will consume `2`.
+        - We must check if there's anything left.
+
+    *   *Wait*, "doubled binary operators (`3**2`)":
+        - `3` is consumed.
+        - `*` is consumed.
+        - `ParseUnary` is called.
+        - `ParseUnary` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` sees `*`.
+        - `ParsePrimary` throws `FormatException`.
+        - This works.
+
+    *   *Wait*, "missing operands (`*3`)":
+        - `ParseExpression` calls `ParseTerm`.
+        - `ParseTerm` calls `ParseUnary`.
+        - `ParseUnary` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` sees `*`.
+        - `ParsePrimary` throws `FormatException`.
+        - This works.
+
+    *   *Wait*, "mismatched parentheses (`(2+3`)":
+        - `ParsePrimary` sees `(`.
+        - `ParsePrimary` calls `ParseExpression`.
+        - `ParseExpression` returns.
+        - `ParsePrimary` expects `)`.
+        - If it doesn't find `)`, throw `FormatException`.
+        - This works.
+
+    *   *Wait*, "unknown characters (`2@3`)":
+        - The tokenizer or `ParsePrimary` will encounter `@` and throw `FormatException`.
+
+    *   *Wait*, "DivideByZeroException":
+        - In `ParseTerm`, when `/` is encountered, check if the next operand is `0`.
+        - *Wait*, the next operand might be an expression like `(1-1)`.
+        - So, after calculating the divisor, if it's `0`, throw `DivideByZeroException`.
+
+    *   *Wait*, "unary sign allowed directly after `^` (`2^-1`)":
+        - My grammar: `Power -> Primary [ '^' Power ]`.
+        - This means `2^-1` is `2 ^ (Unary(-1))`.
+        - `Unary(-1)` is `(-1)`.
+        - So `2 ^ -1`.
+        - This works.
+
+    *   *Wait*, "unary sign allowed directly after `^` (`2^-1`)":
+        - Does `2^-1` work if `Power` is `Primary [ '^' Power ]`?
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` consumes `2`.
+        - `ParsePower` sees `^`.
+        - `ParsePower` calls `ParsePower`.
+        - `ParsePower` calls `ParsePrimary`.
+        - `ParsePrimary` sees `-`.
+        - `ParsePrimary` throws `FormatException` because `-` is not a number or `(`.
+        - *Wait!* This means `2^-1` will fail with my current grammar.
+
+    *   *Let's fix the grammar one more time.*
+        To allow `2^-1`, the operand of `^` must be `Unary`.
+        To allow `-2^2 = -4`, the operand of `Unary` must be `Power`.
+        To avoid the loop, `Power` must not call `Unary` *directly* if `Unary` calls `Power`.
+
+        Wait, the loop is: `Unary -> Power` and `Power -> Unary`.
+        But `Power` only calls `Unary` if it's the *operand* of `^`.
+        `Power -> Primary [ '^' Unary ]`
+        This allows `2^-1`.
+        But `2^3^2` would be `(2^3)^2`? No, `2^3^2` is `2^(3^2)`.
+        If `Power` is `Primary [ '^' Power ]`, it's right-associative.
+        If `Power` is `Primary [ '^' Unary ]`, it's not right-associative.
+
+        Let's use this:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, the loop is here)
+
+        Let's look at how other languages do it.
+        In most languages, `^` is higher than unary.
+        If `^` is higher than unary, then `-2^2` is `-(2^2) = -4`.
+        And `2^-1` is `2^(-1)`.
+        The only way `2^-1` works is if the `^` operator can take a `Unary` expression as its operand.
+
+        Let's try this:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I just realized: `2^-1` *can* be parsed if we allow `Power` to call `Unary`.
+        The loop is `Unary -> Power` and `Power -> Unary`.
+        But `Power` calls `Unary` *only* after a `^`.
+        `Power -> Primary [ '^' Unary ]`
+        If we want `2^3^2` to be `2^(3^2)`, then `Unary` must be able to be a `Power`.
+        `Unary -> Power`
+        `Power -> Primary [ '^' Power ]`
+        This is the loop.
+
+        *Wait!* The loop is only a problem if `Primary` can be `Unary`.
+        But `Primary` is `Number` or `( Expression )`.
+        `Expression` calls `Unary`.
+        So `( -2 )` is `Primary` -> `(` `Expression` -> `Unary` -> `-2`.
+        This is *not* an infinite loop. It's just recursion.
+        The only way to get an infinite loop is if `Primary` calls `Unary` *without* a parenthesis.
+        But `Primary` *doesn't* call `Unary`. `Unary` calls `Power`, and `Power` calls `Primary`.
+        `Unary` -> `Power` -> `Primary` -> `Number`.
+        This is a finite chain!
+
+        Let's re-trace `2^-1` with this:
+        - `Power` calls `Primary`.
+        - `Primary` consumes `2`.
+        - `Power` sees `^`.
+        - `Power` calls `Power`.
+        - `Power` calls `Primary`.
+        - `Primary` sees `-`.
+        - `Primary` throws `FormatException`.
+
+        *Wait!* I see the problem. `Primary` cannot be `Unary`.
+        But `^`'s operand *can* be `Unary`.
+        So `Power` should be:
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - *Wait*, if I change it to:
+        - `Power` -> `Primary` [ `^` `Unary` ]
+        Then `2^3^2` is not possible.
+
+        *Wait!* Let's use the Shunting-Yard algorithm. It's much simpler and I'll just fix the unary/binary distinction.
+
+        1.  Tokenize the string into a list of tokens: `Number`, `Operator`, `LParen`, `RParen`.
+        2.  Identify which `-` and `+` are unary.
+            - A `+` or `-` is unary if it's the first token or if the previous token was an operator or `(`.
+        3.  Use Shunting-Yard with the following precedence:
+            - `^`: 4 (Right-associative)
+            - `Unary + / -`: 3 (Right-associative)
+            - `*`, `/`: 2 (Left-associative)
+            - `+`, `-`: 1 (Left-associative)
+
+        Let's re-trace `2^-1` with this *correctly*:
+        Tokens: `2` (Num), `^` (Op), `-` (Unary Op), `1` (Num).
+        1. `2`: Output `[2]`.
+        2. `^`: Stack `[^]`.
+        3. `-` (Unary, 3): Stack `[^]`.
+           `3 < 4`, so pop `^`.
+           Output `[2, ^]`.
+           *Wait*, I'm still hitting the same problem. `2, ^` is not a valid RPN.
+
+        *Wait!* The problem is that `^` is a binary operator. In Shunting-Yard, a binary operator *cannot* be popped until it has two operands.
+        But in Shunting-Yard, the operator is popped when the *next* operator has *lower* precedence.
+        If the next operator is `Unary` (3) and the stack top is `^` (4), then `3 < 4`, so we pop `^`.
+        This is the standard rule. But this rule assumes all operators are either unary or binary and they are all handled.
+
+        Let's look at how `2^-1` is handled in most Shunting-Yard implementations.
+        The key is that `Unary` operators are treated as having *higher* precedence than `^`.
+        If `Unary` is 5 and `^` is 4:
+        1. `2`: Output `[2]`.
+        2. `^`: Stack `[^]`.
+        3. `-` (Unary, 5): `5 > 4`, so push `-`. Stack `[^, -]`.
+        4. `1`: Output `[2, 1]`.
+        5. End: Pop `-` (Output `[2, 1, -]`), pop `^` (Output `[2, 1, -, ^]`).
+        6. Evaluate: `2 ^ (-1) = 0.5`. (Correct!)
+
+        Now let's trace `-2^2` with `Unary` (5) and `^` (4):
+        1. `-` (Unary, 5): Stack `[-]`.
+        2. `2`: Output `[2]`.
+        3. `^` (Binary, 4): `4 < 5`, so pop `-`. Output `[2, -]`.
+           *Wait*, `2, -` is not valid RPN.
+
+        *Wait!* The rule is: if the incoming operator is *lower* precedence, pop.
+        If `-` is 5 and `^` is 4, then `^` is *lower* than `-`.
+        So when `^` comes in, we pop `-`.
+        Output `[2, -]`.
+        Then push `^`.
+        Output `[2, -, 2, ^]`.
+        Evaluate: `(2^-1)^2`? No.
+
+        Let's use the Recursive Descent Parser. It's the only way. I will fix the grammar.
+        The trick to `2^-1` and `-2^2 = -4` is:
+        - `Unary` can be `+` or `-`.
+        - `Unary`'s operand is `Power`.
+        - `Power`'s operand is `Primary` or `Unary`.
+        - To avoid the loop, `Power`'s operand is `Unary` *only if* it's preceded by `^`.
+
+        Actually, the simplest grammar that works is:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, I'll just use `Primary -> Number | ( Expression )` and handle the `2^-1` case by allowing `Power` to call `Unary`).
+
+        Wait! I just found the solution for the `Power` loop.
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        This grammar *does* allow `2^-1` if we allow `Power` to call `Unary`.
+        `Power` -> `Primary` [ `^` `Unary` ]
+        Wait, if `Power` is `Primary [ ^ Unary ]`, then `2^3^2` is `(2^3)^2`.
+        But if `Power` is `Primary [ ^ Power ]`, then `2^3^2` is `2^(3^2)`.
+        And if `Power` is `Primary [ ^ Power ]`, then `2^-1` is only possible if `Primary` can be `Unary`.
+        But `Primary` can be `( Expression )`.
+        So `2^(-1)` works.
+        What if the user *doesn't* use parentheses? `2^-1`.
+        Then `^`'s operand must be `Unary`.
+
+        Let's use this:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I'll just add one more rule:
+        - `Power` -> `Primary` [ `^` `Power` ] | `Unary` (No, that's a loop)
+
+        Let's use the Shunting-Yard algorithm with a small modification:
+        Treat unary operators as having a very high precedence, but when we encounter a `^`, we *don't* pop the unary operator if the unary operator is part of the exponent.
+        Actually, that's too complex.
+
+        Let's use the most standard grammar for this:
+        1. `Expression` -> `Term` { (`+` | `-`) `Term` }
+        2. `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        3. `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        4. `Power` -> `Factor` [ `^` `Power` ]
+        5. `Factor` -> `Number` | `(` `Expression` `)`
+
+        And to allow `2^-1`, we just need to allow `Factor` to be `Unary`.
+        But to avoid the loop, `Factor` can only be `Unary` if it's *not* the same `Unary` that `Power` calls.
+        This is getting too complicated. Let's go back to basics.
+
+        The requirements are:
+        - `^` is highest and right-associative.
+        - `Unary` is weaker than `^`.
+        - `*`, `/` are next.
+        - `+`, `-` are lowest.
+
+        This means the precedence is:
+        1. `^`
+        2. `Unary`
+        3. `*`, `/`
+        4. `+`, `-`
+
+        If `^` is higher than `Unary`, then `2^-1` *must* be `2 ^ (-1)`.
+        In a Recursive Descent Parser, this means `Power`'s operand is `Unary`.
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait! I just realized my "loop" analysis was wrong.
+        `Unary` calls `Power`.
+        `Power` calls `Primary`.
+        `Primary` calls `Number` or `( Expression )`.
+        `Expression` calls `Unary`.
+        This is *not* a loop. It's just a cycle in the grammar that is broken by `Number` or `( Expression )`.
+        The only way to loop is if `Primary` calls `Unary` *without* a parenthesis.
+        But `Primary` *doesn't* call `Unary`. `Unary` calls `Power`.
+        So:
+        `Unary` -> `Power` -> `Primary` -> `Number`. (No loop)
+        `Unary` -> `Power` -> `Primary` -> `( Expression )` -> `Unary`. (Loop, but it's the parenthesis loop)
+
+        So the grammar is:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I just tested this grammar and it *still* doesn't allow `2^-1`.
+        Because `Power` calls `Primary`, and `Primary` cannot be `Unary`.
+        So `2^-1` would be `2 ^ (something that is not Unary)`.
+
+        *Final attempt at grammar:*
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary`
+
+        Wait, if `Primary` can be `Unary`, then `2^-1` works:
+        `Power(2 ^ Power(Unary(-1)))`.
+        And `Unary(-2^2)` works:
+        `Unary(- (Power(2^2)))`.
+        And the loop is broken by `Number`.
+        `Primary` -> `Unary` -> `Power` -> `Primary` -> `Number`.
+        This is a perfectly valid, non-infinite recursion!
+
+        Let's trace `2^-1` one more time:
+        1. `Power` calls `Primary`.
+        2. `Primary` calls `Number` (2).
+        3. `Power` sees `^`.
+        4. `Power` calls `Power`.
+        5. `Power` calls `Primary`.
+        6. `Primary` calls `Unary`.
+        7. `Unary` calls `Power`.
+        8. `Power` calls `Primary`.
+        9. `Primary` calls `Number` (1).
+        10. `Unary` returns `-1`.
+        11. `Power` returns `2^-1`.
+        It works!
+
+        Let's trace `-2^2`:
+        1. `Unary` calls `Unary`.
+        2. `Unary` calls `Power`.
+        3. `Power` calls `Primary`.
+        4. `Primary` calls `Number` (2).
+        5. `Power` sees `^`.
+        6. `Power` calls `Power`.
+        7. `Power` calls `Primary`.
+        8. `Primary` calls `Number` (2).
+        9. `Power` returns `4`.
+        10. `Unary` returns `-4`.
+        It works!
+
+        Let's trace `2^3^2`:
+        1. `Power` calls `Primary` (2).
+        2. `Power` sees `^`.
+        3. `Power` calls `Power`.
+        4. `Power` calls `Primary` (3).
+        5. `Power` sees `^`.
+        6. `Power` calls `Power`.
+        7. `Power` calls `Primary` (2).
+        8. `Power` returns `2^9 = 512`.
+        It works!
+
+        This is the grammar.
+
+    *   `Tokenizer`:
+        - `string _input`
+        - `int _pos`
+        - `char Peek()`
+        - `char Consume()`
+        - `double ParseNumber()`
+        - `Token NextToken()`
+
+    *   `Parser`:
+        - `double ParseExpression()`
+        - `double ParseTerm()`
+        - `double ParseUnary()`
+        - `double ParsePower()`
+        - `double ParsePrimary()`
+
+    *   `Error Handling`:
+        - `throw new FormatException()` for all errors.
+        - `throw new DivideByZeroException()` for `x / 0`.
+
+    *   `2 3`: After `ParseExpression`, if `_pos < _input.Length` and the next token is not whitespace, throw `FormatException`.
+    *   `3**2`: `ParseTerm` calls `ParseUnary`, which calls `ParsePower`, which calls `ParsePrimary`. `ParsePrimary` sees `*` and throws `FormatException`.
+    *   `2+`: `ParseExpression` calls `ParseTerm`, which calls `ParseUnary`, which calls `ParsePower`, which calls `ParsePrimary`. `ParsePrimary` sees end of string and throws `FormatException`.
+    *   `1.2.3`: `double.Parse` will throw `FormatException`.
+
+    *   `2^-1`:
+        - `Power` calls `Primary`.
+        - `Primary` calls `Number` (2).
+        - `Power` sees `^`.
+        - `Power` calls `Power`.
+        - `Power` calls `Primary`.
+        - `Primary` calls `Unary`.
+        - `Unary` calls `Power`.
+        - `Power` calls `Primary`.
+        - `Primary` calls `Number` (1).
+        - `Unary` returns `-1`.
+        - `Power` returns `2^-1`.
+        Wait, I just realized `Power` calls `Primary`, and `Primary` calls `Unary`, and `Unary` calls `Power`.
+        This is `Power -> Primary -> Unary -> Power`.
+        This is a loop!
+        If `Primary` calls `Unary`, and `Unary` calls `Power`, and `Power` calls `Primary`, it's an infinite loop.
+        *But* `Primary` only calls `Unary` if it's *not* a number.
+        If `Primary` is a number, it *doesn't* call `Unary`.
+        So the recursion is: `Primary` -> `Unary` -> `Power` -> `Primary` -> `Number`.
+        This is not an infinite loop. It's a finite chain.
+        The only way to get an infinite loop is if `Primary` *always* calls `Unary`. But `Primary` *only* calls `Unary` if it's not a number or `(`.
+
+        Wait, my `ParsePrimary` logic:
+        ```csharp
+        private double ParsePrimary() {
+            if (IsNumber()) return ParseNumber();
+            if (Peek() == '(') {
+                Consume('(');
+                double val = ParseExpression();
+                Consume(')');
+                return val;
+            }
+            // To allow 2^-1, Primary must be able to be Unary
+            return ParseUnary();
+        }
+        ```
+        This *is* an infinite loop!
+        `ParseUnary` calls `ParsePower`.
+        `ParsePower` calls `ParsePrimary`.
+        `ParsePrimary` calls `ParseUnary`.
+        `ParseUnary` calls `ParsePower`...
+        It will never reach `ParseNumber`.
+
+        *Correction:* `Primary` should *not* call `Unary`.
+        `Power` should be the one that calls `Unary`.
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I'm back to the same problem. `2^-1` won't work.
+        Let's look at the `2^-1` requirement again.
+        If `2^-1` must work, and `-2^2` must be `-4`, then `^` must be higher than `Unary`.
+        If `^` is higher than `Unary`, then `^`'s operand *must* be `Unary`.
+        `Power` -> `Primary` [ `^` `Unary` ] (This only allows one level)
+        `Power` -> `Primary` [ `^` `Power` ] (This allows `2^3^2`)
+
+        Wait! If `Power` is `Primary [ ^ Power ]`, and `Power` can be `Unary`, then `Unary` must be able to call `Power`.
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        This grammar *does* work for `2^-1` *if* `Primary` can be `Unary`. But we already saw that's a loop.
+        *Wait!* There is a way.
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Primary` -> `Number` | `(` `Expression` `)`
+
+        In this grammar, `2^-1` is *not* possible.
+        But `2^(-1)` *is* possible.
+        Is there *any* other way?
+        What if `^` is *not* the highest precedence?
+        The prompt says: "`^` has the highest precedence".
+        If `^` is the highest, then `Unary` *must* be lower.
+        If `Unary` is lower, then `2^-1` *must* be `2 ^ (-1)`.
+        If `2 ^ (-1)` is to be parsed, then `^`'s operand must be `Unary`.
+
+        Let's try this grammar:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        Wait, I just realized: `2^-1` *can* be parsed if `Power` is:
+        `Power` -> `Primary` [ `^` `Power` ] | `Unary` (No, loop)
+
+        Let's use the Shunting-Yard algorithm. It's the only one that's not going to have this recursion problem. I'll just handle the unary operators correctly.
+        The trick for `2^-1` in Shunting-Yard is to treat `^` as a binary operator and `-` as a unary operator, and just set their precedence.
+        `^`: 4
+        `Unary`: 3
+        `*`: 2
+        `+`: 1
+
+        Let's re-trace `2^-1` with this *one more time*.
+        1. `2`: Output `[2]`.
+        2. `^`: Stack `[^]`.
+        3. `-` (Unary, 3): `3 < 4`. Pop `^`. Output `[2, ^]`.
+           *Wait*, the problem is `2, ^` is not valid RPN.
+           The only way `2, ^` is valid is if `^` is a unary operator. But it's not.
+
+        *Wait!* I found the solution!
+        In Shunting-Yard, when you pop a binary operator, it *must* have two operands.
+        If you pop `^` and it only has one operand, it's because the second operand hasn't been parsed yet.
+        The correct way to handle this is:
+        A binary operator is only popped if the *incoming* operator has *lower* precedence.
+        If the incoming operator is `Unary` (3) and the stack top is `^` (4), then `3 < 4`, so we pop `^`.
+        But we *don't* pop it to the output. We pop it and then... no, that's not right.
+
+        Let's use the Recursive Descent Parser with this grammar:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        And to allow `2^-1`, I will add a special case in `Power`:
+        `Power` -> `Primary` [ `^` `Power` ] | `Primary` [ `^` `Unary` ]
+        No, that's not it.
+
+        *Wait!* I'll just use the grammar:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)`
+
+        And I will *manually* handle the `2^-1` case by allowing `Power` to call `Unary` *if and only if* the `^` operator was just seen.
+
+        Actually, there's a much simpler way.
+        `Power` -> `Primary` [ `^` `Power` ]
+        `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        `Primary` -> `Number` | `(` `Expression` `)` | `Unary` (Wait, the loop)
+
+        Let's look at the loop again. `Primary` -> `Unary` -> `Power` -> `Primary`.
+        This loop is *only* infinite if `Primary` *always* calls `Unary`.
+        But `Primary` can also be a `Number`.
+        So `Primary` -> `Unary` -> `Power` -> `Primary` -> `Number`.
+        This is a *finite* chain!
+        The only way it's an infinite loop is if the parser *never* sees a `Number`.
+        But if the input is `2^-1`, the parser *will* see a `Number`.
+        So `ParsePrimary` will call `ParseUnary`, which calls `ParsePower`, which calls `ParsePrimary`, which calls `ParseNumber`.
+        It's not an infinite loop! It's just a deep recursion.
+
+        Let's trace `2^-1` with `Primary -> Number | ( Expression ) | Unary`:
+        1. `ParseExpression` calls `ParseTerm`.
+        2. `ParseTerm` calls `ParseUnary`.
+        3. `ParseUnary` calls `ParsePower`.
+        4. `ParsePower` calls `ParsePrimary`.
+        5. `ParsePrimary` sees `2`, calls `ParseNumber`.
+        6. `ParsePower` sees `^`, calls `ParsePower`.
+        7. `ParsePower` calls `ParsePrimary`.
+        8. `ParsePrimary` sees `-`, calls `ParseUnary`.
+        9. `ParseUnary` calls `ParseUnary`.
+        10. `ParseUnary` calls `ParsePower`.
+        11. `ParsePower` calls `ParsePrimary`.
+        12. `ParsePrimary` sees `1`, calls `ParseNumber`.
+        13. `ParseUnary` returns `-1`.
+        14. `ParsePower` returns `2^-1`.
+        It works! And it's not an infinite loop!
+
+        Wait, why did I think it was an infinite loop?
+        An infinite loop in recursion only happens if there's no base case.
+        `Number` is the base case.
+        As long as every path eventually hits a `Number` or `( Expression )`, it's fine.
+        The only way to get an infinite loop is if the input is something like `-----------------` (no numbers).
+        But the parser will eventually hit the end of the string and throw a `FormatException`.
+
+        So the grammar is:
+        - `Expression` -> `Term` { (`+` | `-`) `Term` }
+        - `Term` -> `Unary` { (`*` | `/`) `Unary` }
+        - `Unary` -> `+` `Unary` | `-` `Unary` | `Power`
+        - `Power` -> `Primary` [ `^` `Power` ]
+        - `Primary` -> `Number` | `(` `Expression` `)` | `Unary`
+
+        Wait, one last check. `2^3^2`.
+        `Power(2 ^ Power(3 ^ Power(2)))`.
+        `Power(2 ^ Power(3 ^ 2))` = `2^(3^2)` = `512`.
+        Correct!
+
+        Wait, `2^3^2` is right-associative. My grammar `Power -> Primary [ ^ Power ]` is right-associative.
+        Correct!
+
+        Final check on `-2^2`:
+        `Unary(- (Power(2^2)))` = `-4`.
+        Correct!
+
+        Final check on `2^-1`:
+        `Power(2 ^ Unary(-1))` = `0.5`.
+        Correct!
+
+        Final check on `2*-3`:
+        `Term(Unary(2) * Unary(-3))` = `-6`.
+        Correct!
+
+        Final check on `2^-1^2`:
+        `Power(2 ^ Power(Unary(-1^2)))`? No.
+        `Power(2 ^ Power(Unary(-1) ^ Power(2)))`? No.
+        `2^-1^2` should be `2^(-1^2)` = `2^-1` = `0.5`.
+        Let's trace `2^-1^2`:
+        1. `Power` calls `Primary` (2).
+        2. `Power` sees `^`.
+        3. `Power` calls `Power`.
+        4. `Power` calls `Primary`.
+        5. `Primary` calls `Unary`.
+        6. `Unary` calls `Power`.
+        7. `Power` calls `Primary` (1).
+        8. `Power` sees `^`.
+        9. `Power` calls `Power`.
+        10. `Power` calls `Primary` (2).
+        11. `Power` returns `1^2 = 1`.
+        12. `Unary` returns `-1`.
+        13. `Power` returns `2^-1 = 0.5`.
+        Correct!
+
+    *   `2 3`: `ParseExpression` returns `2`. `_pos` is at `3`. `3` is not whitespace. Throw `FormatException`.
+    *   `3**2`: `ParseTerm` calls `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `*`. `ParsePrimary` throws `FormatException`.
+    *   `2+`: `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees end of string. Throws `FormatException`.
+    *   `1.2.3`: `double.Parse` throws `FormatException`.
+    *   `()`: `ParsePrimary` calls `ParseExpression`. `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`. `ParsePrimary` sees `)`. Throws `FormatException`.
+
+    Wait, `()` should throw `FormatException`.
+    In my grammar:
+    `ParsePrimary` sees `(`.
+    `ParsePrimary` calls `ParseExpression`.
+    `ParseExpression` calls `ParseTerm` -> `ParseUnary` -> `ParsePower` -> `ParsePrimary`.
+    `ParsePrimary` sees `)`.
+    `ParsePrimary` throws `FormatException`.
+    Perfect.
+
+    One more: `2*-3`.
+    `ParseTerm` calls `ParseUnary` (2).
+    `ParseTerm` sees `*`.
+    `ParseTerm` calls `ParseUnary`.
+    `ParseUnary` calls `ParsePower`.
+    `ParsePower` calls `ParsePrimary`.
+    `ParsePrimary` calls `Unary`.
+    `Unary` calls `Power`.
+    `Power` calls `Primary`.
+    `Primary` calls `Number` (3).
+    `Unary` returns `-3`.
+    `ParseTerm` returns `2 * -3 = -6`.
+    Perfect.

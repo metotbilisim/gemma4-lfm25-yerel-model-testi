@@ -1,0 +1,16 @@
+✔ BUG-103: Coupons stop working one day too early (1.553ms)
+✔ BUG-104: Fixed-amount coupons split the discount correctly (0.9444ms)
+✔ dailySales report with refunds (1.2068ms)
+✔ money.format (0.524ms)
+✔ simple order totals (0.5993ms)
+✔ percentage coupon is applied before VAT (BUG-101) (0.2152ms)
+✔ failed order leaves stock untouched (BUG-102) (0.3335ms)
+✔ partial refund basic (FEAT-200) (0.333ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 79.2391

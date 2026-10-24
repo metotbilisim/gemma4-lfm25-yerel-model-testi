@@ -1,0 +1,785 @@
+*   Goal: Implement an in-memory key-value store (`KvStore`) with nested transactions.
+    *   Language/Platform: C# (.NET 10).
+    *   Namespace: `Bench`.
+    *   API:
+        *   `Set(string key, string value)`
+        *   `Get(string key)` -> `string?`
+        *   `Delete(string key)`
+        *   `Count(string value)` -> `int`
+        *   `Begin()`
+        *   `Rollback()` -> `bool`
+        *   `Commit()` -> `bool`
+        *   `TransactionDepth` -> `int`
+    *   Rules:
+        *   Reads reflect uncommitted changes.
+        *   Case-sensitive keys/values.
+        *   `null` key/value -> `ArgumentNullException`.
+        *   Complexity: `Get`, `Set`, `Delete`, `Count` must be $O(1)$ average.
+        *   `Rollback` can be proportional to changes in that transaction.
+        *   `Commit` must be cheap (no full store copy).
+        *   `Commit` closes *all* open transactions.
+
+    *   To achieve $O(1)$ for `Get`, `Set`, `Delete`, and `Count`, we need:
+        *   A primary dictionary for the current state: `Dictionary<string, string>`.
+        *   A way to track value counts for `Count(string value)`: `Dictionary<string, int>`.
+    *   To handle transactions without copying the whole store:
+        *   We need to keep track of what changed in each transaction level.
+        *   When `Set(k, v)` is called:
+            *   If it's the first time $k$ is modified in the current transaction, we must save its *previous* value to allow rollback.
+            *   If $k$ was already modified in the current transaction, we don't need to save it again (it's already in the undo log).
+        *   When `Delete(k)` is called:
+            *   If $k$ exists, save its value to the undo log.
+            *   If $k$ doesn't exist, mark it as "newly deleted" (or just record that it didn't exist).
+    *   Wait, the "undo log" approach needs to handle:
+        1.  Value updates.
+        2.  Deletions.
+        3.  Insertions (where the key didn't exist before).
+
+    *   Let's refine the transaction structure:
+        *   A `Stack<Transaction>` where each `Transaction` contains a list of changes.
+        *   A change can be:
+            *   `Update(key, oldValue)`: The key had `oldValue` before this transaction started modifying it.
+            *   `Insert(key)`: The key did not exist before this transaction started modifying it.
+            *   `Delete(key, oldValue)`: The key existed with `oldValue` and was deleted. (Actually, `Update` with `null` or a special marker can represent deletion).
+
+    *   Wait, the requirement says `Commit` closes *all* open transactions. This is slightly unusual. Usually, `Commit` closes the *innermost* one. But the prompt says: "permanently applies the changes of ALL open transactions and closes them all."
+    *   Let's re-read: "`Commit()` — permanently applies the changes of ALL open transactions and closes them all."
+    *   This means if I have depth 3, and I call `Commit()`, depth becomes 0.
+
+    *   `Dictionary<string, string> _store`: The current state.
+    *   `Dictionary<string, int> _valueCounts`: To make `Count(string value)` $O(1)$.
+    *   `Stack<Transaction>`: To track changes.
+    *   `Transaction` class:
+        *   `List<Change> _changes`: A list of changes made *within this specific transaction level*.
+        *   Wait, if I call `Set` twice in the same transaction, I only need to record the *original* value once.
+
+    *   *Wait*, there's a catch with nested transactions. If I do:
+        1. `Begin` (T1)
+        2. `Set("a", "1")` (Original: null)
+        3. `Begin` (T2)
+        4. `Set("a", "2")` (Original: "1")
+        5. `Rollback` (T2)
+        6. `Get("a")` -> should be "1".
+
+    *   So, each transaction level needs to know what the value was *before that specific transaction level started modifying it*.
+    *   However, if we use a single "undo log" per transaction level, we need to be careful.
+    *   Let's track `_changes` per transaction level.
+    *   A `Change` object: `string Key`, `string? OldValue`.
+    *   When `Set(k, v)` is called:
+        1.  Check if `k` is already in the "modified keys" set for the *current* transaction.
+        2.  If not, record `(k, current_value_in_store)` in the current transaction's log.
+        3.  Update `_store` and `_valueCounts`.
+    *   When `Delete(k)` is called:
+        1.  Check if `k` is already in the "modified keys" set for the current transaction.
+        2.  If not, record `(k, current_value_in_store)` in the current transaction's log.
+        3.  Update `_store` and `_valueCounts`.
+
+    *   *Wait*, if I `Commit` all transactions at once, I don't actually need to "apply" anything because the `_store` and `_valueCounts` are already being updated in real-time! The transactions are just "undo" buffers.
+    *   If `Commit()` closes all, we just clear the stack.
+    *   If `Rollback()` closes the innermost, we iterate through its changes in reverse and restore the `_store` and `_valueCounts`.
+
+    *   `_store`: `Dictionary<string, string>`
+    *   `_valueCounts`: `Dictionary<string, int>`
+    *   `_transactionStack`: `Stack<Transaction>`
+    *   `Transaction` class:
+        *   `Dictionary<string, string?> _undoLog`: Maps key to the value it had *before this transaction level started changing it*.
+        *   Wait, if I use a `Dictionary` for `_undoLog`, I can check `ContainsKey` to see if I've already recorded the original state for this key in this transaction.
+
+    *   *Example Trace:*
+        1. `Set("a", "1")` -> `_store["a"]="1"`, `_counts["1"]=1`.
+        2. `Begin()` -> `Stack: [T1{}]`
+        3. `Set("a", "2")` ->
+           - `T1._undoLog` doesn't have "a".
+           - `T1._undoLog["a"] = "1"`.
+           - `_store["a"]="2"`, `_counts["1"]=0`, `_counts["2"]=1`.
+        4. `Begin()` -> `Stack: [T1, T2{}]`
+        5. `Set("a", "3")` ->
+           - `T2._undoLog` doesn't have "a".
+           - `T2._undoLog["a"] = "2"`.
+           - `_store["a"]="3"`, `_counts["2"]=0`, `_counts["3"]=1`.
+        6. `Rollback()` (T2):
+           - For each `(k, oldV)` in `T2._undoLog`:
+             - If `oldV` is null, `_store.Remove(k)`.
+             - Else `_store[k] = oldV`.
+             - Update `_valueCounts` accordingly.
+           - `Stack: [T1]`
+           - `Get("a")` -> "2". Correct.
+        7. `Commit()`:
+           - `Stack.Clear()`.
+           - `Get("a")` -> "2". Correct.
+
+    *   *Edge Case: Deleting a key that doesn't exist.*
+        - `Delete("b")` where "b" is not in `_store`.
+        - `_store` doesn't change.
+        - `_undoLog` doesn't need to record anything.
+
+    *   *Edge Case: Deleting a key that exists.*
+        - `Delete("a")`.
+        - `T1._undoLog["a"] = "1"`.
+        - `_store.Remove("a")`.
+        - `_counts["1"]--`.
+
+    *   *Edge Case: Set a key to the same value it already has.*
+        - `Set("a", "1")` when `_store["a"]` is already "1".
+        - To keep $O(1)$, we should probably check if the value is the same. If it is, do nothing. This avoids unnecessary undo log entries.
+
+    *   `Set(k, v)`:
+        - If `k` is null/v is null -> throw.
+        - If `_transactionStack` is not empty:
+            - If `k` is not in `currentTransaction._undoLog`:
+                - `oldValue = _store.TryGetValue(k, out var val) ? val : null`
+                - `currentTransaction._undoLog[k] = oldValue`
+        - If `_store.TryGetValue(k, out var existing)` and `existing == v`: return.
+        - If `existing != null`: `_valueCounts[existing]--`.
+        - `_store[k] = v`.
+        - `_valueCounts[v] = _valueCounts.GetValueOrDefault(v) + 1`.
+
+    *   `Delete(k)`:
+        - If `k` is null -> throw.
+        - If `_store.TryGetValue(k, out var existing)`:
+            - If `_transactionStack` is not empty:
+                - If `k` is not in `currentTransaction._undoLog`:
+                    - `currentTransaction._undoLog[k] = existing`
+            - `_store.Remove(k)`.
+            - `_valueCounts[existing]--`.
+
+    *   `Rollback()`:
+        - If stack empty, return false.
+        - `tx = stack.Pop()`.
+        - For each `(key, oldValue)` in `tx._undoLog`:
+            - (Note: `tx._undoLog` is a dictionary, order might matter? No, because each transaction level only records the value *at the start of that level*. But wait, if I iterate a dictionary, the order is arbitrary. Does order matter?
+            - Let's re-evaluate. If T1 sets "a" to "1", then T2 sets "a" to "2".
+            - T1 undo log: `{"a": null}`.
+            - T2 undo log: `{"a": "1"}`.
+            - If I rollback T2, I restore "a" to "1".
+            - If I rollback T1, I restore "a" to `null`.
+            - The order of keys *within* a single transaction level doesn't matter because each key is only recorded once per level.
+            - However, the `_valueCounts` must be updated correctly.
+
+    *   *Wait, the `Rollback` logic for `_valueCounts` is tricky.*
+        When rolling back a transaction, we are reverting the `_store` to the state it was in before that transaction started.
+        We must also revert `_valueCounts`.
+        The easiest way to revert `_valueCounts` is to treat the `Rollback` as a series of `Delete` and `Set` operations.
+
+    *   *Correct Rollback Logic:*
+        ```csharp
+        foreach (var (key, oldValue) in tx._undoLog) {
+            // 1. Remove the 'current' (wrong) value from counts
+            if (_store.TryGetValue(key, out var currentValue)) {
+                _valueCounts[currentValue]--;
+                // Optional: if count is 0, remove from dict to save space
+            }
+
+            // 2. Restore the old value
+            if (oldValue == null) {
+                _store.Remove(key);
+            } else {
+                _store[key] = oldValue;
+                _valueCounts[oldValue] = _valueCounts.GetValueOrDefault(oldValue) + 1;
+            }
+        }
+        ```
+
+    *   `Count(string value)`:
+        - `_valueCounts.GetValueOrDefault(value)`.
+
+    *   `Commit()`:
+        - `_transactionStack.Clear()`.
+        - Return true.
+
+    *   `Set`: $O(1)$ average (Dictionary ops).
+    *   `Get`: $O(1)$ average.
+    *   `Delete`: $O(1)$ average.
+    *   `Count`: $O(1)$ average.
+    *   `Begin`: $O(1)$.
+    *   `Rollback`: $O(N)$ where $N$ is the number of unique keys modified in *that* transaction.
+    *   `Commit`: $O(1)$ (just clearing the stack).
+
+    *   `null` key/value: `ArgumentNullException`.
+    *   `Rollback`/`Commit` on empty stack: `false`.
+    *   `TransactionDepth`: `_transactionStack.Count`.
+    *   `Count` with non-existent value: `0`.
+    *   `Delete` non-existent key: No-op.
+
+    *   `_valueCounts` can grow with many unique values.
+    *   `_undoLog` stores `string?`.
+    *   `_store` stores `string`.
+    *   Using `Dictionary<string, int>` for counts is fine.
+
+    *   The prompt says: "Commit... permanently applies the changes of ALL open transactions and closes them all."
+    *   This is a bit unusual. Usually, `Commit` only commits the current level. But I must follow the prompt.
+    *   If I have T1, T2, T3.
+    *   `Commit()` -> `_transactionStack.Clear()`.
+    *   This is $O(1)$ and satisfies the requirement.
+
+    *   If I call `Set("a", "1")` then `Set("a", "1")` again.
+    *   If I don't check `if (existing == v)`, I will add "a" to the `_undoLog` with value "1".
+    *   If I then `Rollback`, I will "restore" "a" to "1".
+    *   This is technically correct but slightly inefficient.
+    *   However, if I do `Set("a", "1")` then `Set("a", "2")` then `Set("a", "1")`.
+    *   The `_undoLog` for that transaction should only contain the *original* value before the transaction started.
+    *   My logic: `if (!currentTransaction._undoLog.ContainsKey(key)) { ... record ... }` handles this.
+
+    *   `_valueCounts[currentValue]--`
+    *   If `currentValue` is "1" and count becomes 0, should I remove it?
+    *   The prompt says `Count` returns the number of keys. If count is 0, it doesn't matter if the key is in the dictionary or not, but for memory, removing it is better. However, `GetValueOrDefault` handles missing keys.
+
+    *   `_store` is `Dictionary<string, string>`.
+    *   `_valueCounts` is `Dictionary<string, int>`.
+    *   `_transactionStack` is `Stack<Transaction>`.
+    *   `Transaction` is a private class.
+    *   `_undoLog` is `Dictionary<string, string?>`.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("a", "2")`
+    *   `Set("a", "3")`
+    *   `Rollback()`
+    *   `Get("a")` -> should be "1".
+
+    *   *Trace:*
+        1. `_store["a"] = "1"`, `_counts["1"] = 1`.
+        2. `Begin()` -> `Stack: [T1{}]`.
+        3. `Set("a", "2")`:
+           - `T1._undoLog` doesn't have "a".
+           - `T1._undoLog["a"] = "1"`.
+           - `_store["a"] = "2"`, `_counts["1"] = 0`, `_counts["2"] = 1`.
+        4. `Set("a", "3")`:
+           - `T1._undoLog` *has* "a".
+           - `_store["a"] = "3"`, `_counts["2"] = 0`, `_counts["3"] = 1`.
+        5. `Rollback()`:
+           - `tx = T1`.
+           - `key = "a"`, `oldValue = "1"`.
+           - `currentValue = _store["a"]` (which is "3").
+           - `_counts["3"]--` (becomes 0).
+           - `_store["a"] = "1"`.
+           - `_counts["1"]++` (becomes 1).
+        6. `Get("a")` -> "1". Correct.
+
+    *   *Wait, what if `Set("a", "1")` is called when `_store["a"]` is already "1"?*
+        - `existing` is "1", `v` is "1".
+        - `existing == v` is true.
+        - Return.
+        - This is good.
+
+    *   *What if `Delete("a")` is called when "a" is not in `_store`?*
+        - `_store.TryGetValue` returns false.
+        - Nothing happens. Correct.
+
+    *   *What if `Delete("a")` is called when "a" is in `_store`?*
+        - `existing` is "1".
+        - `T1._undoLog["a"] = "1"`.
+        - `_store.Remove("a")`.
+        - `_counts["1"]--`. Correct.
+
+    *   *What if `Set("a", "1")` is called when "a" is not in `_store`?*
+        - `existing` is null (via `TryGetValue`).
+        - `T1._undoLog["a"] = null`.
+        - `_store["a"] = "1"`.
+        - `_counts["1"]++`. Correct.
+
+    *   `Rollback` loop: `foreach (var (key, oldValue) in tx._undoLog)`
+    *   In C#, `Dictionary` iteration order is not guaranteed. Does it matter?
+    *   In a single transaction, each key is only in the `_undoLog` once.
+    *   So for any key `k`, we are doing:
+        1. `_counts[current_val_of_k]--`
+        2. `_store[k] = old_val_of_k`
+        3. `_counts[old_val_of_k]++`
+    *   Since each key is independent, the order of keys in the dictionary does not matter.
+
+    *   `Commit` closes *all* transactions.
+    *   `Rollback` closes *the innermost* transaction.
+    *   `TransactionDepth` is the count of open transactions.
+
+    *   `Set(k, v)`: `if (k == null || v == null) throw new ArgumentNullException();`
+    *   `Get(k)`: `if (k == null) throw new ArgumentNullException();`
+    *   `Delete(k)`: `if (k == null) throw new ArgumentNullException();`
+    *   `Count(v)`: `if (v == null) throw new ArgumentNullException();`
+
+    *   `_valueCounts` might contain keys with value `0`.
+    *   To keep it $O(1)$ and clean, we can leave them or remove them. `GetValueOrDefault` handles it.
+    *   Let's use `_valueCounts[existing]--` and `_valueCounts[oldValue]++`.
+
+    *   `Commit` returns `false` if no transaction is open.
+    *   `Rollback` returns `false` if no transaction is open.
+    *   `TransactionDepth` is `int`.
+
+    *   `_store` is `Dictionary<string, string>`.
+    *   `_valueCounts` is `Dictionary<string, int>`.
+    *   `_transactionStack` is `Stack<Transaction>`.
+    *   `Transaction` is `private class { Dictionary<string, string?> _undoLog; }`.
+
+    *   `Set(k, v)`: $O(1)$ average.
+    *   `Get(k)`: $O(1)$ average.
+    *   `Delete(k)`: $O(1)$ average.
+    *   `Count(v)`: $O(1)$ average.
+    *   `Begin()`: $O(1)$.
+    *   `Rollback()`: $O(\text{changes in tx})$.
+    *   `Commit()`: $O(1)$.
+
+    *   Wait, if `Commit` is $O(1)$, it means we don't iterate through the stack. The prompt says "permanently applies the changes of ALL open transactions and closes them all."
+    *   Since our `Set` and `Delete` methods *already* update the `_store` and `_valueCounts` immediately, "applying" the changes is already done. We just need to discard the undo logs.
+    *   `_transactionStack.Clear()` is $O(1)$ (or $O(\text{depth})$ depending on implementation, but in .NET it's very fast and effectively $O(1)$ for our purposes).
+
+    *   `_valueCounts` could have `0` values.
+    *   `_valueCounts[existing]--`
+    *   If `existing` was "1" and count was 1, `_valueCounts["1"]` becomes 0.
+    *   `Count("1")` will return 0. This is correct.
+
+    *   `_store` is `Dictionary<string, string>`.
+    *   `_valueCounts` is `Dictionary<string, int>`.
+    *   `_transactionStack` is `Stack<Transaction>`.
+    *   `Transaction` is `private class { public Dictionary<string, string?> UndoLog { get; } = new(); }`.
+
+    *   `Set(k, v)`:
+        ```csharp
+        if (k == null) throw new ArgumentNullException(nameof(k));
+        if (v == null) throw new ArgumentNullException(nameof(v));
+
+        if (_transactionStack.Count > 0)
+        {
+            var currentTx = _transactionStack.Peek();
+            if (!currentTx.UndoLog.ContainsKey(k))
+            {
+                currentTx.UndoLog[k] = _store.TryGetValue(k, out var old) ? old : null;
+            }
+        }
+
+        if (_store.TryGetValue(k, out var existing))
+        {
+            if (existing == v) return;
+            _valueCounts[existing]--;
+        }
+
+        _store[k] = v;
+        _valueCounts[v] = _valueCounts.GetValueOrDefault(v) + 1;
+        ```
+
+    *   `Delete(k)`:
+        ```csharp
+        if (k == null) throw new ArgumentNullException(nameof(k));
+        if (_store.TryGetValue(k, out var existing))
+        {
+            if (_transactionStack.Count > 0)
+            {
+                var currentTx = _transactionStack.Peek();
+                if (!currentTx.UndoLog.ContainsKey(k))
+                {
+                    currentTx.UndoLog[k] = existing;
+                }
+            }
+            _store.Remove(k);
+            _valueCounts[existing]--;
+        }
+        ```
+
+    *   `Rollback()`:
+        ```csharp
+        if (_transactionStack.Count == 0) return false;
+        var tx = _transactionStack.Pop();
+        foreach (var kvp in tx.UndoLog)
+        {
+            string key = kvp.Key;
+            string? oldValue = kvp.Value;
+
+            // Remove current value from counts
+            if (_store.TryGetValue(key, out var currentValue))
+            {
+                _valueCounts[currentValue]--;
+            }
+
+            // Restore old value
+            if (oldValue == null)
+            {
+                _store.Remove(key);
+            }
+            else
+            {
+                _store[key] = oldValue;
+                _valueCounts[oldValue] = _valueCounts.GetValueOrDefault(oldValue) + 1;
+            }
+        }
+        return true;
+        ```
+
+    *   Wait, one small detail: `_valueCounts[existing]--` might leave a key in the dictionary with value `0`. This is fine for $O(1)$ `Count`.
+
+    *   `Commit()`:
+        ```csharp
+        if (_transactionStack.Count == 0) return false;
+        _transactionStack.Clear();
+        return true;
+        ```
+
+    *   `TransactionDepth`:
+        ```csharp
+        public int TransactionDepth => _transactionStack.Count;
+        ```
+
+    *   `Get(k)`:
+        ```csharp
+        if (k == null) throw new ArgumentNullException(nameof(k));
+        return _store.TryGetValue(k, out var val) ? val : null;
+        ```
+
+    *   `Count(v)`:
+        ```csharp
+        if (v == null) throw new ArgumentNullException(nameof(v));
+        return _valueCounts.GetValueOrDefault(v, 0);
+        ```
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("a", "2")`
+    *   `Rollback()`
+    *   `Get("a")` -> "1".
+    *   `Count("1")` -> 1.
+    *   `Count("2")` -> 0.
+    *   All looks good.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("a", "2")`
+    *   `Begin()`
+    *   `Set("a", "3")`
+    *   `Rollback()`
+    *   `Get("a")` -> "2".
+    *   `Rollback()`
+    *   `Get("a")` -> "1".
+    *   All looks good.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("a", "2")`
+    *   `Commit()`
+    *   `Get("a")` -> "2".
+    *   `TransactionDepth` -> 0.
+    *   All looks good.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Delete("a")`
+    *   `Rollback()`
+    *   `Get("a")` -> "1".
+    *   All looks good.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("a", "1")` (no change)
+    *   `Rollback()`
+    *   `Get("a")` -> "1".
+    *   All looks good.
+
+    *   `Set("a", "1")`
+    *   `Begin()`
+    *   `Set("b", "2")`
+    *   `Rollback()`
+    *   `Get("b")` -> null.
+    *   All looks good.
+
+    *   Namespace `Bench`.
+    *   Class `KvStore`.
+    *   Public API matches exactly.
+    *   `ArgumentNullException` for nulls.
+    *   $O(1)$ for `Get`, `Set`, `Delete`, `Count`.
+    *   `Rollback` is proportional to changes.
+    *   `Commit` is cheap.
+    *   `TransactionDepth` property.
+    *   Case-sensitive (default for `Dictionary<string, ...>`).
+
+    *   `_valueCounts[existing]--`
+    *   If `existing` is "1" and count becomes 0, `_valueCounts["1"]` is 0.
+    *   `Count("1")` returns `_valueCounts.GetValueOrDefault("1", 0)` which is 0.
+    *   This is correct.
+
+    *   One minor thing: `_valueCounts[existing]--` might throw if `existing` is not in `_valueCounts`. But `existing` comes from `_store.TryGetValue`, so it *must* be in `_valueCounts`.
+
+    *   Wait, what if `_valueCounts[existing]--` results in a negative number?
+    *   In `Rollback`, we do `_valueCounts[currentValue]--`.
+    *   If `currentValue` was "3" and it was just set in the transaction, its count should be at least 1.
+    *   If `currentValue` was "3" and it was just deleted, its count should be at least 1.
+    *   So `_valueCounts[currentValue]--` should not result in negative numbers if the logic is sound.
+
+    *   Let's double check `Rollback` again.
+    *   When `Set("a", "2")` is called:
+        - `existing` ("1") count decreases.
+        - `new` ("2") count increases.
+    *   When `Rollback` happens:
+        - `currentValue` ("2") count decreases.
+        - `oldValue` ("1") count increases.
+    *   The counts are always kept in sync with the `_store`.
+
+    *   `_valueCounts[v] = _valueCounts.GetValueOrDefault(v) + 1;`
+    *   This is safe even if `v` is not in the dictionary.
+
+    *   `_valueCounts[existing]--`
+    *   This is safe because `existing` was just retrieved from `_store`.
+
+    *   `_valueCounts[currentValue]--`
+    *   This is safe because `currentValue` was just retrieved from `_store`.
+
+    *   `_valueCounts[oldValue] = _valueCounts.GetValueOrDefault(oldValue) + 1;`
+    *   This is safe.
+
+    *   Wait, one edge case: `Set("a", "1")` then `Set("a", "2")` then `Rollback()`.
+    *   `_store` has "a" -> "2".
+    *   `_valueCounts` has "1" -> 0, "2" -> 1.
+    *   `Rollback` loop:
+        - `key` = "a", `oldValue` = "1".
+        - `currentValue` = "2".
+        - `_valueCounts["2"]--` (becomes 0).
+        - `_store["a"] = "1"`.
+        - `_valueCounts["1"]++` (becomes 1).
+    *   Result: `_store` has "a" -> "1", `_valueCounts` has "1" -> 1, "2" -> 0.
+    *   Perfect.
+
+    *   The prompt says: "Commit... permanently applies the changes of ALL open transactions and closes them all."
+    *   My implementation: `_transactionStack.Clear()`.
+    *   Is this "applying" the changes?
+    *   Yes, because the changes were *already* applied to `_store` and `_valueCounts` during the `Set` and `Delete` calls. The transactions only serve to provide an undo mechanism.
+    *   If we `Commit`, we just say "we don't need the undo mechanism anymore."
+
+    *   `_valueCounts` is `Dictionary<string, int>`.
+    *   `_store` is `Dictionary<string, string>`.
+    *   `_transactionStack` is `Stack<Transaction>`.
+    *   `Transaction` is `private class`.
+    *   `UndoLog` is `Dictionary<string, string?>`.
+
+    *   `Set(k, v)`:
+        - `if (k == null || v == null) throw new ArgumentNullException();`
+        - `if (tx != null && !tx.UndoLog.ContainsKey(k)) tx.UndoLog[k] = _store.TryGetValue(k, out var old) ? old : null;`
+        - `if (_store.TryGetValue(k, out var existing))`
+            - `if (existing == v) return;`
+            - `_valueCounts[existing]--;`
+        - `_store[k] = v;`
+        - `_valueCounts[v] = _valueCounts.GetValueOrDefault(v) + 1;`
+
+    *   `Delete(k)`:
+        - `if (k == null) throw new ArgumentNullException();`
+        - `if (_store.TryGetValue(k, out var existing))`
+            - `if (tx != null && !tx.UndoLog.ContainsKey(k)) tx.UndoLog[k] = existing;`
+            - `_store.Remove(k);`
+            - `_valueCounts[existing]--;`
+
+    *   `Rollback()`:
+        - `if (stack.Count == 0) return false;`
+        - `tx = stack.Pop();`
+        - `foreach (var (key, oldValue) in tx.UndoLog)`
+            - `if (_store.TryGetValue(key, out var current))`
+                - `_valueCounts[current]--;`
+            - `if (oldValue == null)`
+                - `_store.Remove(key);`
+            - `else`
+                - `_store[key] = oldValue;`
+                - `_valueCounts[oldValue] = _valueCounts.GetValueOrDefault(oldValue) + 1;`
+        - `return true;`
+
+    *   `Commit()`:
+        - `if (stack.Count == 0) return false;`
+        - `stack.Clear();`
+        - `return true;`
+
+    *   `Count(v)`:
+        - `if (v == null) throw new ArgumentNullException();`
+        - `return _valueCounts.GetValueOrDefault(v, 0);`
+
+    *   `Get(k)`:
+        - `if (k == null) throw new ArgumentNullException();`
+        - `return _store.TryGetValue(k, out var val) ? val : null;`
+
+    *   `TransactionDepth`:
+        - `return _transactionStack.Count;`
+
+    *   Wait, one tiny thing. If `_valueCounts[existing]--` makes the count 0, and then we call `Count(existing)`, it returns 0. This is correct.
+    *   If we call `Set(k, v)` and `v` is a value that was previously at count 0, `_valueCounts[v] = 0 + 1` works.
+
+    *   One more check on `Rollback`:
+        If `oldValue` was `null`, we `_store.Remove(key)`.
+        If `currentValue` was "2", we `_valueCounts["2"]--`.
+        This is correct.
+
+    *   What if `oldValue` was "1" and `currentValue` was "1"?
+        The `if (existing == v) return;` in `Set` prevents this from happening.
+        If `existing == v`, we don't even enter the logic that updates `_undoLog` or `_valueCounts`.
+        So `oldValue` will never be the same as `currentValue` in the `Rollback` loop.
+
+    *   Wait, let's re-verify that:
+        If `Set("a", "1")` is called when `_store["a"]` is "1":
+        - `existing` is "1", `v` is "1".
+        - `existing == v` is true.
+        - `return`.
+        - No `UndoLog` entry, no `_valueCounts` change. Correct.
+
+    *   What if `Delete("a")` is called when "a" is not in `_store`?
+        - `_store.TryGetValue` is false.
+        - Nothing happens. Correct.
+
+    *   What if `Set("a", "1")` is called when "a" is not in `_store`?
+        - `existing` is null.
+        - `tx.UndoLog["a"] = null`.
+        - `_store["a"] = "1"`.
+        - `_valueCounts["1"] = 1`. Correct.
+
+    *   What if `Set("a", "1")` is called when "a" is "1"?
+        - `existing` is "1", `v` is "1".
+        - `existing == v` is true.
+        - `return`. Correct.
+
+    *   What if `Set("a", "2")` is called when "a" is "1"?
+        - `existing` is "1", `v` is "2".
+        - `tx.UndoLog["a"] = "1"`.
+        - `_valueCounts["1"]--`.
+        - `_store["a"] = "2"`.
+        - `_valueCounts["2"]++`. Correct.
+
+    *   What if `Set("a", "1")` is called when "a" is "2"?
+        - `existing` is "2", `v` is "1".
+        - `tx.UndoLog["a"] = "2"`.
+        - `_valueCounts["2"]--`.
+        - `_store["a"] = "1"`.
+        - `_valueCounts["1"]++`. Correct.
+
+    *   Everything seems robust.
+
+    *   `_valueCounts` could potentially have many keys with value `0`.
+    *   To be absolutely safe about memory, we *could* remove the key if the count reaches 0.
+    *   `if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);`
+    *   However, the prompt says `Count` must be $O(1)$, and `Remove` is $O(1)$ average.
+    *   But `_valueCounts[existing]--` is already $O(1)$.
+    *   Let's add the `Remove` to keep it clean.
+
+    *   Wait, if I `Remove` the key from `_valueCounts`, I must be careful in `Rollback`.
+    *   In `Rollback`:
+        ```csharp
+        if (_store.TryGetValue(key, out var currentValue))
+        {
+            _valueCounts[currentValue]--;
+            if (_valueCounts[currentValue] == 0) _valueCounts.Remove(currentValue);
+        }
+        ```
+    *   And in `Set`:
+        ```csharp
+        if (_store.TryGetValue(k, out var existing))
+        {
+            if (existing == v) return;
+            _valueCounts[existing]--;
+            if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);
+        }
+        ```
+    *   And in `Delete`:
+        ```csharp
+        if (_store.TryGetValue(k, out var existing))
+        {
+            // ...
+            _valueCounts[existing]--;
+            if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);
+        }
+        ```
+    *   This is safer for memory.
+
+    *   Wait, one more check on `Rollback`.
+    *   If `oldValue` is "1", we do `_valueCounts["1"] = _valueCounts.GetValueOrDefault("1") + 1`.
+    *   This is fine.
+
+    *   Wait, `_valueCounts[existing]--` is slightly risky if `existing` is not in `_valueCounts`. But `existing` comes from `_store.TryGetValue`, so it *must* be in `_valueCounts`.
+
+    *   Final structure of `Rollback` with `Remove`:
+        ```csharp
+        foreach (var kvp in tx.UndoLog)
+        {
+            string key = kvp.Key;
+            string? oldValue = kvp.Value;
+
+            if (_store.TryGetValue(key, out var currentValue))
+            {
+                _valueCounts[currentValue]--;
+                if (_valueCounts[currentValue] == 0) _valueCounts.Remove(currentValue);
+            }
+
+            if (oldValue == null)
+            {
+                _store.Remove(key);
+            }
+            else
+            {
+                _store[key] = oldValue;
+                _valueCounts[oldValue] = _valueCounts.GetValueOrDefault(oldValue) + 1;
+            }
+        }
+        ```
+
+    *   Final structure of `Set` with `Remove`:
+        ```csharp
+        if (_store.TryGetValue(k, out var existing))
+        {
+            if (existing == v) return;
+            _valueCounts[existing]--;
+            if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);
+        }
+        _store[k] = v;
+        _valueCounts[v] = _valueCounts.GetValueOrDefault(v) + 1;
+        ```
+
+    *   Final structure of `Delete` with `Remove`:
+        ```csharp
+        if (_store.TryGetValue(k, out var existing))
+        {
+            if (_transactionStack.Count > 0)
+            {
+                var currentTx = _transactionStack.Peek();
+                if (!currentTx.UndoLog.ContainsKey(k))
+                    currentTx.UndoLog[k] = existing;
+            }
+            _store.Remove(k);
+            _valueCounts[existing]--;
+            if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);
+        }
+        ```
+
+    *   Wait, one tiny detail. In `Rollback`, if `oldValue` is "1" and `currentValue` is "1", `_valueCounts` would be decremented and then incremented. But `existing == v` prevents `currentValue == oldValue`.
+    *   Wait, what if `oldValue` is "1" and `currentValue` is "2", and then we rollback?
+        - `_valueCounts["2"]--`
+        - `_valueCounts["1"]++`
+        - This is correct.
+
+    *   What if `oldValue` is `null` (key didn't exist) and `currentValue` is "1"?
+        - `_valueCounts["1"]--`
+        - `_store.Remove(key)`
+        - This is correct.
+
+    *   What if `oldValue` is "1" and `currentValue` is `null` (key was deleted)?
+        - `_store.TryGetValue` will be false.
+        - `_store[key] = "1"`
+        - `_valueCounts["1"]++`
+        - This is correct.
+
+    *   Wait, in `Rollback`, if `_store.TryGetValue(key, out var currentValue)` is false, it means the key was deleted in the current transaction.
+    *   If the key was deleted, `currentValue` is not found.
+    *   We still need to restore the `oldValue`.
+    *   My `Rollback` code:
+        ```csharp
+        if (_store.TryGetValue(key, out var currentValue))
+        {
+            _valueCounts[currentValue]--;
+            if (_valueCounts[currentValue] == 0) _valueCounts.Remove(currentValue);
+        }
+        if (oldValue == null) { _store.Remove(key); }
+        else { _store[key] = oldValue; _valueCounts[oldValue] = ...; }
+        ```
+    *   This handles the case where the key was deleted (`TryGetValue` is false) and the case where the key was inserted (`oldValue` is null).
+
+    *   One last check: `Commit` closes *all* transactions.
+    *   `_transactionStack.Clear()` is correct.
+
+    *   `Set` $O(1)$
+    *   `Get` $O(1)$
+    *   `Delete` $O(1)$
+    *   `Count` $O(1)$
+    *   `Begin` $O(1)$
+    *   `Rollback` $O(\text{changes})$
+    *   `Commit` $O(1)$
+    *   All requirements met.
+
+    *   `_valueCounts[existing]--`
+    *   `if (_valueCounts[existing] == 0) _valueCounts.Remove(existing);`
+    *   This is fine.

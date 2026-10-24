@@ -1,0 +1,538 @@
+
+*   Environment: Node.js (v24), CommonJS (`module.exports`).
+*   Functions to export: `promisePool` and `retry`.
+
+    *   Input: `taskFns` (array of zero-arg functions), `limit` (number).
+    *   Constraints:
+        *   Max `limit` concurrent tasks.
+        *   Continuous execution (start next as soon as one finishes).
+        *   Result order must match input order.
+        *   Fail-fast: If any task fails, reject immediately and stop starting new tasks.
+        *   Empty array $\to$ `[]`.
+        *   `limit` validation: Must be a positive integer. If not, reject with `TypeError`.
+    *   Implementation Strategy:
+        *   Validate `limit` using `Number.isInteger(limit) && limit > 0`.
+        *   Handle empty `taskFns`.
+        *   Use an index to track the next task to run.
+        *   Use an array to store results.
+        *   Use a counter or a set of active promises to manage concurrency.
+        *   Use a flag `failed` to stop starting new tasks if one fails.
+        *   Wrap the execution in a `new Promise`.
+
+    *   Input: `fn` (function), `options` (object).
+    *   Options: `{ retries = 3, delayMs = 0, factor = 2, shouldRetry = (err) => true }`.
+    *   Logic:
+        *   Call `fn(attempt)` where `attempt` starts at 1.
+        *   On success: return value.
+        *   On failure:
+            *   Check if `attempt <= retries` (total attempts = `retries + 1`).
+            *   Check `shouldRetry(err)`.
+            *   If both true: wait `delayMs * factor ** (attempt - 1)` ms, then retry with `attempt + 1`.
+            *   Else: reject with the error.
+    *   Implementation Strategy:
+        *   Use a loop or recursion. A loop is often cleaner for async/await.
+        *   Handle `options` defaults using destructuring.
+        *   Use `setTimeout` wrapped in a promise for the delay.
+
+    *   *Validation:*
+        ```javascript
+        if (!Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError('limit must be a positive integer');
+        }
+        ```
+    *   *Concurrency Logic:*
+        We need to track:
+        1. `currentIndex`: which task is next.
+        2. `results`: array of results.
+        3. `activeCount`: how many are running.
+        4. `errorOccurred`: flag to stop.
+        5. `completedCount`: how many finished.
+
+        Wait, the requirement says: "If any task rejects or throws, the returned promise rejects with that error immediately, and no new tasks are started after that point".
+
+        ```javascript
+        return new Promise((resolve, reject) => {
+            if (taskFns.length === 0) return resolve([]);
+            let currentIndex = 0;
+            let completedCount = 0;
+            let runningCount = 0;
+            let failed = false;
+            const results = new Array(taskFns.length);
+
+            async function runNext() {
+                if (failed || currentIndex >= taskFns.length) return;
+
+                const taskIndex = currentIndex++;
+                runningCount++;
+
+                try {
+                    // Execute task. Handle sync throws by wrapping in try/catch.
+                    const result = await taskFns[taskIndex]();
+                    if (failed) return; // Already failed elsewhere
+
+                    results[taskIndex] = result;
+                    completedCount++;
+                    runningCount--;
+
+                    if (completedCount === taskFns.length) {
+                        resolve(results);
+                    } else {
+                        runNext();
+                    }
+                } catch (err) {
+                    if (!failed) {
+                        failed = true;
+                        reject(err);
+                    }
+                } finally {
+                    // If we didn't fail, we might need to decrement runningCount
+                    // but the logic above handles it.
+                    // However, if we failed, we don't want to trigger more.
+                }
+            }
+
+            // Initial burst
+            const initialBatch = Math.min(limit, taskFns.length);
+            for (let i = 0; i < initialBatch; i++) {
+                runNext();
+            }
+        });
+        ```
+
+    *   *Wait, the `runNext` logic above has a slight flaw:* If a task fails, `failed` becomes true. The `runNext` calls currently in flight will finish, but they won't trigger new ones. That's correct.
+
+    *   *Refining `promisePool` logic:*
+        Let's use a more robust pattern.
+
+        ```javascript
+        async function promisePool(taskFns, limit) {
+            if (!Number.isInteger(limit) || limit <= 0) {
+                throw new TypeError('limit must be a positive integer');
+            }
+            if (taskFns.length === 0) return [];
+
+            return new Promise((resolve, reject) => {
+                const results = new Array(taskFns.length);
+                let nextTaskIndex = 0;
+                let completedCount = 0;
+                let hasFailed = false;
+
+                async function worker() {
+                    while (nextTaskIndex < taskFns.length && !hasFailed) {
+                        const index = nextTaskIndex++;
+                        try {
+                            const result = await taskFns[index]();
+                            if (hasFailed) return;
+                            results[index] = result;
+                            completedCount++;
+                            if (completedCount === taskFns.length) {
+                                resolve(results);
+                            }
+                        } catch (err) {
+                            if (!hasFailed) {
+                                hasFailed = true;
+                                reject(err);
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                // Start up to 'limit' workers
+                const workersToStart = Math.min(limit, taskFns.length);
+                for (let i = 0; i < workersToStart; i++) {
+                    worker();
+                }
+            });
+        }
+        ```
+
+    *   *Logic Check:*
+        - `limit` validation: `Number.isInteger(limit) && limit > 0`. Correct.
+        - `taskFns` empty: `[]`. Correct.
+        - Concurrency: `workersToStart` workers are created. Each worker pulls from the shared `nextTaskIndex`. Correct.
+        - Fail-fast: `hasFailed` flag prevents new tasks from starting and prevents `resolve` from being called. Correct.
+        - Order: `results[index] = result`. Correct.
+
+    ```javascript
+    async function retry(fn, options = {}) {
+        const {
+            retries = 3,
+            delayMs = 0,
+            factor = 2,
+            shouldRetry = (err) => true
+        } = options;
+
+        let lastError;
+        for (let attempt = 1; attempt <= retries + 1; attempt++) {
+            try {
+                return await fn(attempt);
+            } catch (err) {
+                lastError = err;
+                const canRetry = attempt <= retries && shouldRetry(err);
+                if (!canRetry) {
+                    throw lastError;
+                }
+                const waitTime = delayMs * Math.pow(factor, attempt - 1);
+                if (waitTime > 0) {
+                    await new Promise(r => setTimeout(r, waitTime));
+                }
+            }
+        }
+    }
+    ```
+
+    *   *Logic Check:*
+        - `attempt` starts at 1. Correct.
+        - Total calls: `retries + 1`. If `retries` is 3, loop runs for `attempt` 1, 2, 3, 4.
+        - If `attempt` is 1, and it fails: `1 <= 3` is true. Wait `delayMs * factor^0`.
+        - If `attempt` is 4, and it fails: `4 <= 3` is false. Throws `lastError`. Correct.
+        - Delay calculation: `delayMs * factor ** (attempt - 1)`. Correct.
+        - `shouldRetry` check: Included. Correct.
+
+    *   `promisePool` needs to handle the `TypeError` for `limit` correctly. The requirement says "the returned promise rejects with a TypeError".
+    *   In my `promisePool` implementation, I used `throw new TypeError`. Since `promisePool` is an `async` function, throwing inside it automatically causes the returned promise to reject. This satisfies the requirement.
+
+    *   `taskFns` elements: "Each may return a promise, return a plain value, or throw synchronously."
+    *   My `await taskFns[index]()` handles all three:
+        - If it returns a promise, it awaits it.
+        - If it returns a value, `await` wraps it in a resolved promise.
+        - If it throws synchronously, the `try/catch` catches it.
+
+    *   `limit` validation:
+        - `0`: `!Number.isInteger(0) || 0 <= 0` -> `false || true` -> `true`. Rejects.
+        - `-1`: `true`. Rejects.
+        - `1.5`: `!Number.isInteger(1.5)` -> `true`. Rejects.
+        - `"2"`: `!Number.isInteger("2")` -> `true`. Rejects.
+        - `NaN`: `!Number.isInteger(NaN)` -> `true`. Rejects.
+
+    *   `retry` delay:
+        - `attempt 1`: `delayMs * factor ** 0` = `delayMs`.
+        - `attempt 2`: `delayMs * factor ** 1`.
+        - This matches the requirement.
+
+    *   `retry` total calls:
+        - `retries = 3`.
+        - `attempt = 1`: fails, `1 <= 3` is true.
+        - `attempt = 2`: fails, `2 <= 3` is true.
+        - `attempt = 3`: fails, `3 <= 3` is true.
+        - `attempt = 4`: fails, `4 <= 3` is false. Throws.
+        - Total attempts: 4. (Initial + 3 retries). Correct.
+
+    *   `promisePool` concurrency:
+        - If `limit` is 2 and `taskFns` has 5 items.
+        - 2 workers start.
+        - Worker 1 finishes, `nextTaskIndex` is 2, it picks up index 2.
+        - Worker 2 finishes, `nextTaskIndex` is 3, it picks up index 3.
+        - This is the "as soon as one finishes, start the next one" requirement.
+
+    *   `promisePool` fail-fast:
+        - If task at index 1 fails.
+        - `hasFailed` becomes true.
+        - `reject(err)` is called.
+        - The `while` loop in other workers checks `!hasFailed` and exits.
+        - No new tasks are started.
+
+    *   `retry` `shouldRetry`:
+        - If `shouldRetry` returns false, it should stop immediately.
+        - My code: `const canRetry = attempt <= retries && shouldRetry(err); if (!canRetry) throw lastError;`. Correct.
+
+    *   `retry` `fn(attempt)`:
+        - `fn` is called with `attempt`. Correct.
+
+    *   Node.js v24 (latest/upcoming) uses standard ES features. CommonJS is requested.
+    *   `module.exports = { promisePool, retry };`
+
+    *   `promisePool` is `async`.
+    *   `retry` is `async`.
+    *   `taskFns` is an array.
+    *   `limit` is a number.
+    *   `options` is an object.
+
+    Wait, one small detail in `promisePool`:
+    If `limit` is not a positive integer, the requirement says "the returned promise rejects with a TypeError".
+    If I use `async function promisePool(...) { if (...) throw new TypeError(...) }`, the function returns a promise that rejects. This is correct.
+
+    One edge case: `taskFns` is not an array. The prompt doesn't explicitly ask to validate `taskFns`, but it's good practice. However, I'll stick strictly to the requirements to avoid unnecessary complexity.
+
+    One more check on `promisePool` worker loop:
+    ```javascript
+    async function worker() {
+        while (nextTaskIndex < taskFns.length && !hasFailed) {
+            const index = nextTaskIndex++;
+            // ...
+        }
+    }
+    ```
+    If `nextTaskIndex` is incremented, but the task fails, `hasFailed` is set. The other workers will see `hasFailed` in their `while` condition and stop. This is correct.
+
+    Wait, there's a race condition in `const index = nextTaskIndex++;`.
+    If two workers check `nextTaskIndex < taskFns.length` at the same time, they might both enter.
+    Example: `nextTaskIndex` is 4, `taskFns.length` is 5.
+    Worker A checks `4 < 5` (true).
+    Worker B checks `4 < 5` (true).
+    Worker A increments `nextTaskIndex` to 5.
+    Worker B increments `nextTaskIndex` to 6.
+    Worker B might try to access `taskFns[5]` which is undefined.
+    Actually, `nextTaskIndex++` is an atomic-like operation in the single-threaded event loop *until* the next `await`.
+    But `nextTaskIndex++` happens *before* the `await`.
+    So:
+    1. Worker A: `index = nextTaskIndex++` (index is 4, nextTaskIndex is 5).
+    2. Worker B: `index = nextTaskIndex++` (index is 5, nextTaskIndex is 6).
+    3. Worker B: `taskFns[5]` is undefined.
+    Wait, if `taskFns.length` is 5, valid indices are 0-4.
+    If `nextTaskIndex` was 4, Worker A gets 4, `nextTaskIndex` becomes 5.
+    Worker B gets 5, `nextTaskIndex` becomes 6.
+    Worker B will try to call `taskFns[5]()`. This will throw an error.
+    Since the error is caught by the `try/catch`, it will trigger the `hasFailed` logic.
+    To be safe, I should check the index *after* incrementing or use a more robust way.
+
+    *Better worker loop:*
+    ```javascript
+    async function worker() {
+        while (true) {
+            let index;
+            // Synchronous block to grab the next index
+            if (nextTaskIndex < taskFns.length && !hasFailed) {
+                index = nextTaskIndex++;
+            } else {
+                break;
+            }
+
+            try {
+                const result = await taskFns[index]();
+                if (hasFailed) return;
+                results[index] = result;
+                completedCount++;
+                if (completedCount === taskFns.length) {
+                    resolve(results);
+                }
+            } catch (err) {
+                if (!hasFailed) {
+                    hasFailed = true;
+                    reject(err);
+                }
+                return;
+            }
+        }
+    }
+    ```
+    Since Node.js is single-threaded, the code between `while(true)` and `await` is synchronous. The `if` check and the `nextTaskIndex++` will happen without any other code interleaving. This prevents the race condition.
+
+    *Wait, one more thing:*
+    If `taskFns[index]` is not a function, `taskFns[index]()` will throw. The `try/catch` handles it.
+
+    *Final check on `retry` delay:*
+    `delayMs * factor ** (attempt - 1)`
+    Attempt 1: `delayMs * factor ** 0` = `delayMs * 1`.
+    Attempt 2: `delayMs * factor ** 1`.
+    This is correct.
+
+    *Final check on `promisePool` empty array:*
+    `if (taskFns.length === 0) return [];`
+    Since it's an `async` function, it returns a promise that resolves to `[]`. Correct.
+
+    *Final check on `promisePool` limit validation:*
+    `if (!Number.isInteger(limit) || limit <= 0)`
+    `limit = 1.5` -> `!true || false` -> `false`. Wait.
+    `Number.isInteger(1.5)` is `false`.
+    `!false` is `true`.
+    So `true || ...` is `true`. It enters the `if` block and throws. Correct.
+
+    *Final check on `retry` `fn(attempt)`:*
+    `fn` is called with `attempt`.
+    `attempt` starts at 1.
+    If it fails, `attempt` becomes 2, etc. Correct.
+
+    *Final check on `retry` `shouldRetry`:*
+    `shouldRetry` is an optional property.
+    `const { ..., shouldRetry = (err) => true } = options;`
+    If `options` is `{}` (default), `shouldRetry` is the default function. Correct.
+
+    *One detail:* `retry`'s `options` is optional.
+    `async function retry(fn, options = {})` handles this.
+
+    *One detail:* `promisePool`'s `taskFns` might contain functions that throw synchronously.
+    `const result = await taskFns[index]();`
+    If `taskFns[index]` is `() => { throw new Error(); }`, the `await` will catch the thrown error. Correct.
+
+    *One detail:* `promisePool`'s `limit` validation.
+    "If `limit` is not a positive integer... the returned promise rejects with a `TypeError`."
+    My code:
+    ```javascript
+    async function promisePool(taskFns, limit) {
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new TypeError('limit must be a positive integer');
+      }
+      // ...
+    }
+    ```
+    In an `async` function, `throw` results in a rejected promise. This is perfect.
+
+    *Wait, `retry`'s `delayMs * factor ** (attempt - 1)`:*
+    If `delayMs` is 0, the delay is 0.
+    `0 * factor ** (attempt - 1)` is 0.
+    `await new Promise(r => setTimeout(r, 0))` is fine.
+
+    *Wait, `retry`'s `factor`:*
+    If `factor` is 2 and `attempt` is 1, `2 ** 0` is 1.
+    If `factor` is 2 and `attempt` is 2, `2 ** 1` is 2.
+    If `factor` is 2 and `attempt` is 3, `2 ** 2` is 4.
+    This is standard exponential backoff.
+
+    *Self-Correction on `promisePool` worker:*
+    The `while(true)` loop with the synchronous index increment is the safest way to handle concurrency in a single-threaded event loop to avoid the "over-grabbing" of indices.
+
+    ```javascript
+    async function worker() {
+        while (true) {
+            let index;
+            // This block is synchronous, so no other worker can interleave here
+            if (nextTaskIndex < taskFns.length && !hasFailed) {
+                index = nextTaskIndex++;
+            } else {
+                break;
+            }
+
+            try {
+                const result = await taskFns[index]();
+                if (hasFailed) return;
+                results[index] = result;
+                completedCount++;
+                if (completedCount === taskFns.length) {
+                    resolve(results);
+                }
+            } catch (err) {
+                if (!hasFailed) {
+                    hasFailed = true;
+                    reject(err);
+                }
+                return;
+            }
+        }
+    }
+    ```
+
+    One final check: "If any task rejects or throws, the returned promise rejects with that error immediately, and no new tasks are started after that point (tasks already running are simply left alone)."
+    - `reject(err)` is called immediately.
+    - `hasFailed` is set to `true`.
+    - The `while` loop condition `!hasFailed` prevents any worker from starting a new task.
+    - Existing workers will finish their `await` and then hit the `if (hasFailed) return;` or the `while` condition and exit.
+    - This perfectly matches the requirement.
+
+    `module.exports = { promisePool, retry };`
+
+    ```javascript
+    /**
+     * @param {Array<Function>} taskFns
+     * @param {number} limit
+     */
+    async function promisePool(taskFns, limit) {
+        if (!Number.isInteger(limit) || limit <= 0) {
+            throw new TypeError('limit must be a positive integer');
+        }
+        if (taskFns.length === 0) return [];
+
+        return new Promise((resolve, reject) => {
+            const results = new Array(taskFns.length);
+            let nextTaskIndex = 0;
+            let completedCount = 0;
+            let hasFailed = false;
+
+            async function worker() {
+                while (true) {
+                    let index;
+                    // Synchronous check and increment to prevent race conditions
+                    if (nextTaskIndex < taskFns.length && !hasFailed) {
+                        index = nextTaskIndex++;
+                    } else {
+                        break;
+                    }
+
+                    try {
+                        const result = await taskFns[index]();
+                        if (hasFailed) return;
+                        results[index] = result;
+                        completedCount++;
+                        if (completedCount === taskFns.length) {
+                            resolve(results);
+                        }
+                    } catch (err) {
+                        if (!hasFailed) {
+                            hasFailed = true;
+                            reject(err);
+                        }
+                        return;
+                    }
+                }
+            }
+
+            const workersToStart = Math.min(limit, taskFns.length);
+            for (let i = 0; i < workersToStart; i++) {
+                worker();
+            }
+        });
+    }
+
+    /**
+     * @param {Function} fn
+     * @param {Object} options
+     */
+    async function retry(fn, options = {}) {
+        const {
+            retries = 3,
+            delayMs = 0,
+            factor = 2,
+            shouldRetry = (err) => true
+        } = options;
+
+        let lastError;
+        for (let attempt = 1; attempt <= retries + 1; attempt++) {
+            try {
+                return await fn(attempt);
+            } catch (err) {
+                lastError = err;
+                const canRetry = attempt <= retries && shouldRetry(err);
+                if (!canRetry) {
+                    throw lastError;
+                }
+                const waitTime = delayMs * Math.pow(factor, attempt - 1);
+                if (waitTime > 0) {
+                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                }
+            }
+        }
+    }
+
+    module.exports = { promisePool, retry };
+    ```
+
+    Wait, one tiny detail: `retry`'s `shouldRetry` check.
+    Requirement: "If it rejects/throws, and fewer than `retries` retries have been made so far, and `shouldRetry(err)` returns true, wait... and call `fn` again".
+    My code:
+    `attempt` is the current attempt number (1, 2, 3...).
+    If `retries` is 3:
+    - Attempt 1: `attempt <= 3` is true.
+    - Attempt 2: `attempt <= 3` is true.
+    - Attempt 3: `attempt <= 3` is true.
+    - Attempt 4: `attempt <= 3` is false.
+    So it allows 3 retries (total 4 attempts). This is correct.
+
+    Wait, the requirement says: "If it rejects/throws, and fewer than `retries` retries have been made so far...".
+    If `retries` is 3:
+    - 1st attempt fails. Retries made: 0. (0 < 3).
+    - 2nd attempt fails. Retries made: 1. (1 < 3).
+    - 3rd attempt fails. Retries made: 2. (2 < 3).
+    - 4th attempt fails. Retries made: 3. (3 is not < 3).
+    My code: `attempt <= retries`.
+    If `attempt` is 1, `1 <= 3` is true.
+    If `attempt` is 2, `2 <= 3` is true.
+    If `attempt` is 3, `3 <= 3` is true.
+    If `attempt` is 4, `4 <= 3` is false.
+    This matches perfectly.
+
+    One last check on `promisePool`'s `limit` validation:
+    If `limit` is `NaN`: `Number.isInteger(NaN)` is `false`. `!false` is `true`. Throws. Correct.
+    If `limit` is `"2"`: `Number.isInteger("2")` is `false`. `!false` is `true`. Throws. Correct.
+
+    The code looks solid.

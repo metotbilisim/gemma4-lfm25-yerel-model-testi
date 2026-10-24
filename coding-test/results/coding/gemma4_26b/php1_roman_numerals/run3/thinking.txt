@@ -1,0 +1,522 @@
+*   Language: PHP 8.4.
+    *   Class: `final class RomanNumerals` (no namespace).
+    *   Methods:
+        *   `static toRoman(int $n): string`: 1..3999 $\rightarrow$ Roman numeral (subtractive form). Throw `\InvalidArgumentException` otherwise.
+        *   `static fromRoman(string $s): int`: Roman numeral $\rightarrow$ integer. Must accept *only* canonical forms. Throw `\InvalidArgumentException` for anything else (empty, lowercase, whitespace, non-canonical like "IIII", "VV", "IC", etc.).
+        *   `static add(string $a, string $b): string`: Roman numeral + Roman numeral $\rightarrow$ Roman numeral. Throw `\InvalidArgumentException` if inputs are invalid or sum is out of range (1..3999).
+    *   Constraints: No namespace, no printing, no test/demo code, single code block.
+
+    *   Standard Roman numerals:
+        *   M = 1000, CM = 900, D = 500, CD = 400, C = 100, XC = 90, L = 50, XL = 40, X = 10, IX = 9, V = 5, IV = 4, I = 1.
+    *   Mapping (Descending order):
+        *   1000: M
+        *   900: CM
+        *   500: D
+        *   400: CD
+        *   100: C
+        *   90: XC
+        *   50: L
+        *   40: XL
+        *   10: X
+        *   9: IX
+        *   5: V
+        *   4: IV
+        *   1: I
+
+    *   Algorithm: Iterate through the mapping, subtract values from $n$ while possible, append symbols.
+
+    *   This is the hardest part because of the "canonical only" requirement.
+    *   A simple "summing" algorithm (like `IV` = 4) isn't enough because it would accept `IIII`.
+    *   The most robust way to ensure "canonical only" is to convert the input string back to an integer using the standard method, and then convert that integer back to a Roman numeral using `toRoman`. If the resulting string matches the input string exactly, it's canonical.
+    *   Wait, let's refine the "standard method" for `fromRoman` first.
+        *   Iterate through string.
+        *   If current value < next value, subtract current.
+        *   Else, add current.
+    *   Validation steps:
+        1.  Check if string is empty.
+        2.  Check if string contains only valid characters (I, V, X, L, C, D, M).
+        3.  Check if string is uppercase.
+        4.  Convert string to integer.
+        5.  Convert integer back to Roman using `toRoman`.
+        6.  If `toRoman(integer) === input_string`, it's canonical. Otherwise, throw exception.
+
+    *   Example: `fromRoman("IIII")`
+        1.  `IIII` $\rightarrow$ 4.
+        2.  `toRoman(4)` $\rightarrow$ `IV`.
+        3.  `IV !== IIII` $\rightarrow$ Throw exception.
+
+    *   Example: `fromRoman("IC")`
+        1.  `IC` $\rightarrow$ 99.
+        2.  `toRoman(99)` $\rightarrow$ `XCIX`.
+        3.  `XCIX !== IC` $\rightarrow$ Throw exception.
+
+    *   Example: `fromRoman("VX")`
+        1.  `VX` $\rightarrow$ 5 (wait, V=5, X=10, so 10-5=5).
+        2.  `toRoman(5)` $\rightarrow$ `V`.
+        3.  `V !== VX` $\rightarrow$ Throw exception.
+
+    *   This approach covers all "non-canonical" requirements perfectly.
+
+    *   `$valA = fromRoman($a)`
+    *   `$valB = fromRoman($b)`
+    *   `$sum = $valA + $valB`
+    *   `return toRoman($sum)` (Note: `toRoman` already throws if sum > 3999).
+
+    *   `toRoman(int $n)`:
+        ```php
+        if ($n < 1 || $n > 3999) throw new \InvalidArgumentException();
+        $map = [
+            'M' => 1000, 'CM' => 900, 'D' => 500, 'CD' => 400,
+            'C' => 100, 'XC' => 90, 'L' => 50, 'XL' => 40,
+            'X' => 10, 'IX' => 9, 'V' => 5, 'IV' => 4, 'I' => 1
+        ];
+        $res = '';
+        foreach ($map as $roman => $value) {
+            while ($n >= $value) {
+                $res .= $roman;
+                $n -= $value;
+            }
+        }
+        return $res;
+        ```
+
+    *   `fromRoman(string $s)`:
+        ```php
+        if ($s === '') throw new \InvalidArgumentException();
+        // Check characters and case
+        if (!preg_match('/^[IVXLCDM]+$/', $s)) throw new \InvalidArgumentException();
+
+        // Standard conversion logic
+        $map = ['I' => 1, 'V' => 5, 'X' => 10, 'L' => 50, 'C' => 100, 'D' => 500, 'M' => 1000];
+        $total = 0;
+        $len = strlen($s);
+        for ($i = 0; $i < $len; $i++) {
+            $current = $map[$s[$i]];
+            $next = ($i + 1 < $len) ? $map[$s[$i+1]] : 0;
+            if ($current < $next) {
+                $total -= $current;
+            } else {
+                $total += $current;
+            }
+        }
+
+        if ($total < 1 || $total > 3999) throw new \InvalidArgumentException();
+
+        // Canonical check
+        if (self::toRoman($total) !== $s) {
+            throw new \InvalidArgumentException();
+        }
+        return $total;
+        ```
+
+    *   `add(string $a, string $b)`:
+        ```php
+        $valA = self::fromRoman($a);
+        $valB = self::fromRoman($b);
+        return self::toRoman($valA + $valB);
+        ```
+
+    *   `toRoman(4)`: `IV` (Correct).
+    *   `toRoman(1994)`: `MCMXCIV` (Correct).
+    *   `fromRoman("IIII")`: `total` = 4. `toRoman(4)` = `IV`. `IV !== IIII`. Throws. (Correct).
+    *   `fromRoman("VV")`: `total` = 10. `toRoman(10)` = `X`. `X !== VV`. Throws. (Correct).
+    *   `fromRoman("IC")`: `total` = 99. `toRoman(99)` = `XCIX`. `XCIX !== IC`. Throws. (Correct).
+    *   `fromRoman("IIV")`: `total` = 3. `toRoman(3)` = `III`. `III !== IIV`. Throws. (Correct).
+    *   `fromRoman("XM")`: `total` = 990. `toRoman(990)` = `CMXC`. `CMXC !== XM`. Throws. (Correct).
+    *   `fromRoman("MMMM")`: `total` = 4000. `toRoman(4000)` throws. (Correct).
+    *   `fromRoman(" ")`: `preg_match` fails. Throws. (Correct).
+    *   `fromRoman("iv")`: `preg_match` fails. Throws. (Correct).
+
+    *   PHP 8.4 features: Not strictly required to use new features unless helpful, but the syntax should be modern.
+    *   `final class RomanNumerals`.
+    *   `static` methods.
+    *   `\InvalidArgumentException`.
+    *   No namespace.
+    *   No test code.
+    *   Single code block.
+
+    *   `fromRoman` logic:
+        *   `preg_match('/^[IVXLCDM]+$/', $s)` ensures only uppercase valid characters.
+        *   The loop calculates the integer value.
+        *   The `toRoman($total) !== $s` check is the "magic bullet" for canonicality.
+
+    *   `toRoman` logic:
+        *   Standard greedy algorithm.
+
+    *   `add` logic:
+        *   Uses the other two methods.
+
+    *   `toRoman(1)`: `I`
+    *   `toRoman(3999)`: `MMMCMXCIX`
+    *   `fromRoman("MCMXCIV")` $\rightarrow$ 1994.
+    *   `add("X", "V")` $\rightarrow$ `XV`.
+    *   `add("MMM", "CMXCIX")` $\rightarrow$ `MMMM`? Wait, `toRoman(3999)` is the limit. `add("MMM", "CMXCIX")` is `toRoman(3999)` which is fine. `add("MMM", "M")` $\rightarrow$ `toRoman(4000)` $\rightarrow$ throws.
+
+    *   `fromRoman` must accept *only* canonical numerals.
+    *   `toRoman` produces standard subtractive form.
+    *   `fromRoman` must throw for:
+        *   Empty string: `preg_match` with `+` quantifier handles this (returns false for empty string).
+        *   Lowercase: `preg_match` handles this.
+        *   Whitespace: `preg_match` handles this.
+        *   Other characters: `preg_match` handles this.
+        *   Non-canonical: `toRoman($total) !== $s` handles this.
+
+    One edge case: `fromRoman` with a string that results in a number outside 1..3999.
+    Example: `fromRoman("MMMM")`.
+    `total` becomes 4000.
+    `toRoman(4000)` throws `\InvalidArgumentException`.
+    The requirement says `fromRoman` must throw `\InvalidArgumentException` for non-canonical forms. `MMMM` is non-canonical. So this is correct.
+
+    Wait, let's check `fromRoman("MMMM")` again.
+    `$total` = 4000.
+    `self::toRoman(4000)` is called.
+    `toRoman` throws `\InvalidArgumentException`.
+    This satisfies the requirement.
+
+    What about `fromRoman("I")`?
+    `total` = 1.
+    `toRoman(1)` = "I".
+    "I" === "I". Returns 1. Correct.
+
+    What about `fromRoman("II")`?
+    `total` = 2.
+    `toRoman(2)` = "II".
+    "II" === "II". Returns 2. Correct.
+
+    What about `fromRoman("III")`?
+    `total` = 3.
+    `toRoman(3)` = "III".
+    "III" === "III". Returns 3. Correct.
+
+    What about `fromRoman("IIII")`?
+    `total` = 4.
+    `toRoman(4)` = "IV".
+    "IV" !== "IIII". Throws. Correct.
+
+    One small detail: `preg_match` returns `1` on success, `0` on failure, and `false` on error.
+    `if (!preg_match('/^[IVXLCDM]+$/', $s))` is safe.
+
+    *   `toRoman` range: 1..3999.
+    *   `fromRoman` range: must be canonical (which implies 1..3999).
+    *   `add` range: result must be 1..3999.
+
+    Wait, `fromRoman` doesn't explicitly check if `$total` is in range before calling `toRoman`.
+    If `$total` is 0 or 4000, `toRoman` will throw.
+    Is it possible for `fromRoman` to get a `$total` of 0?
+    With `preg_match('/^[IVXLCDM]+$/', $s)`, the string must have at least one character. The smallest value is 'I' (1). So `$total` will be at least 1.
+    Is it possible for `$total` to be very large? Yes, `MMMM...`.
+    If `$total` is 4000, `toRoman(4000)` throws.
+    If `$total` is 0 (not possible here), `toRoman(0)` throws.
+    So the logic is sound.
+
+    One tiny thing: `fromRoman` should handle the case where `toRoman` throws.
+    If `fromRoman("MMMM")` is called:
+    1. `preg_match` passes.
+    2. `total` becomes 4000.
+    3. `self::toRoman(4000)` is called.
+    4. `toRoman` throws `\InvalidArgumentException`.
+    5. `fromRoman` propagates the exception.
+    This is correct.
+
+    Final check on `fromRoman` logic:
+    ```php
+    $map = ['I' => 1, 'V' => 5, 'X' => 10, 'L' => 50, 'C' => 100, 'D' => 500, 'M' => 1000];
+    $total = 0;
+    $len = strlen($s);
+    for ($i = 0; $i < $len; $i++) {
+        $current = $map[$s[$i]];
+        $next = ($i + 1 < $len) ? $map[$s[$i+1]] : 0;
+        if ($current < $next) {
+            $total -= $current;
+        } else {
+            $total += $current;
+        }
+    }
+    ```
+    If $s = "IV":
+    $i=0: $current=1, $next=5. $current < $next is true. $total = -1.
+    $i=1: $current=5, $next=0. $current < $next is false. $total = -1 + 5 = 4.
+    Correct.
+
+    If $s = "IX":
+    $i=0: $current=1, $next=10. $total = -1.
+    $i=1: $current=10, $next=0. $total = -1 + 10 = 9.
+    Correct.
+
+    If $s = "MCMXCIV":
+    M: 1000
+    C: 100 < 1000 (M) -> -100
+    M: 1000
+    X: 10 < 100 (C) -> -10
+    C: 100
+    I: 1 < 5 (V) -> -1
+    V: 5
+    Total: 1000 - 100 + 1000 - 10 + 100 - 1 + 5 = 1994.
+    Correct.
+
+    Wait, let's re-calculate `MCMXCIV`:
+    M (1000)
+    CM (900)
+    XC (90)
+    IV (4)
+    1000 + 900 + 90 + 4 = 1994.
+    My manual trace:
+    $i=0 (M): current 1000, next 100. 1000 < 100 is false. total = 1000.
+    $i=1 (C): current 100, next 1000. 100 < 1000 is true. total = 1000 - 100 = 900.
+    $i=2 (M): current 1000, next 10. 1000 < 10 is false. total = 900 + 1000 = 1900.
+    $i=3 (X): current 10, next 100. 10 < 100 is true. total = 1900 - 10 = 1890.
+    $i=4 (C): current 100, next 1. 100 < 1 is false. total = 1890 + 100 = 1990.
+    $i=5 (I): current 1, next 5. 1 < 5 is true. total = 1990 - 1 = 1989.
+    $i=6 (V): current 5, next 0. 5 < 0 is false. total = 1989 + 5 = 1994.
+    Correct.
+
+    *   `toRoman` uses a loop with a map.
+    *   `fromRoman` uses a loop with a map and a canonicality check.
+    *   `add` uses both.
+    *   All methods are `static`.
+    *   Class is `final`.
+    *   No namespace.
+    *   Throws `\InvalidArgumentException`.
+    *   PHP 8.4 (standard syntax).
+
+    One tiny detail: `fromRoman` should throw `\InvalidArgumentException` if the string is not canonical.
+    If `fromRoman("IIII")` is called:
+    `total` = 4.
+    `toRoman(4)` returns `"IV"`.
+    `"IV" !== "IIII"` is true.
+    Throws `\InvalidArgumentException`.
+    This is perfect.
+
+    What about `fromRoman("VV")`?
+    `total` = 10.
+    `toRoman(10)` returns `"X"`.
+    `"X" !== "VV"` is true.
+    Throws `\InvalidArgumentException`.
+    Perfect.
+
+    What about `fromRoman("IC")`?
+    `total` = 99.
+    `toRoman(99)` returns `"XCIX"`.
+    `"XCIX" !== "IC"` is true.
+    Throws `\InvalidArgumentException`.
+    Perfect.
+
+    What about `fromRoman("X")`?
+    `total` = 10.
+    `toRoman(10)` returns `"X"`.
+    `"X" === "X"` is true.
+    Returns 10.
+    Perfect.
+
+    What about `fromRoman("XIX")`?
+    `total` = 19.
+    `toRoman(19)` returns `"XIX"`.
+    `"XIX" === "XIX"` is true.
+    Returns 19.
+    Perfect.
+
+    The `preg_match` handles:
+    - Empty string (returns 0, `!0` is true, throws).
+    - Lowercase (returns 0, `!0` is true, throws).
+    - Whitespace (returns 0, `!0` is true, throws).
+    - Other characters (returns 0, `!0` is true, throws).
+
+    Everything seems solid.
+
+    ```php
+    final class RomanNumerals
+    {
+        /**
+         * @throws \InvalidArgumentException
+         */
+        public static function toRoman(int $n): string
+        {
+            if ($n < 1 || $n > 3999) {
+                throw new \InvalidArgumentException("Number must be between 1 and 3999.");
+            }
+
+            $map = [
+                'M' => 1000, 'CM' => 900, 'D' => 500, 'CD' => 400,
+                'C' => 100, 'XC' => 90, 'L' => 50, 'XL' => 40,
+                'X' => 10, 'IX' => 9, 'V' => 5, 'IV' => 4, 'I' => 1
+            ];
+
+            $result = '';
+            foreach ($map as $roman => $value) {
+                while ($n >= $value) {
+                    $result .= $roman;
+                    $n -= $value;
+                }
+            }
+
+            return $result;
+        }
+
+        /**
+         * @throws \InvalidArgumentException
+         */
+        public static function fromRoman(string $s): int
+        {
+            if ($s === '' || !preg_match('/^[IVXLCDM]+$/', $s)) {
+                throw new \InvalidArgumentException("Invalid Roman numeral string.");
+            }
+
+            $map = ['I' => 1, 'V' => 5, 'X' => 10, 'L' => 50, 'C' => 100, 'D' => 500, 'M' => 1000];
+            $total = 0;
+            $len = strlen($s);
+
+            for ($i = 0; $i < $len; $i++) {
+                $current = $map[$s[$i]];
+                $next = ($i + 1 < $len) ? $map[$s[$i + 1]] : 0;
+
+                if ($current < $next) {
+                    $total -= $current;
+                } else {
+                    $total += $current;
+                }
+            }
+
+            // The canonical check: convert back and compare.
+            // This handles non-canonical forms like "IIII", "VV", "IC", etc.
+            // It also handles numbers out of range because toRoman will throw.
+            if (self::toRoman($total) !== $s) {
+                throw new \InvalidArgumentException("Non-canonical Roman numeral.");
+            }
+
+            return $total;
+        }
+
+        /**
+         * @throws \InvalidArgumentException
+         */
+        public static function add(string $a, string $b): string
+        {
+            $valA = self::fromRoman($a);
+            $valB = self::fromRoman($b);
+
+            return self::toRoman($valA + $valB);
+        }
+    }
+    ```
+
+    Wait, one small detail in `fromRoman`:
+    If `self::toRoman($total)` throws an exception, `fromRoman` will throw that same exception.
+    `toRoman` throws `\InvalidArgumentException`.
+    The requirement says `fromRoman` must throw `\InvalidArgumentException` for non-canonical forms.
+    So if `fromRoman("MMMM")` is called, `toRoman(4000)` is called, which throws `\InvalidArgumentException`. This is exactly what is required.
+
+    One more check: `fromRoman` "must accept ONLY canonical numerals".
+    If I pass `fromRoman("X")`, `total` is 10, `toRoman(10)` is "X", "X" === "X", returns 10. Correct.
+    If I pass `fromRoman("VV")`, `total` is 10, `toRoman(10)` is "X", "X" !== "VV", throws. Correct.
+
+    The `preg_match` pattern `^[IVXLCDM]+$` ensures:
+    - No whitespace.
+    - No lowercase.
+    - No empty string (due to `+`).
+    - No other characters.
+
+    The `toRoman($total) !== $s` ensures:
+    - No "IIII".
+    - No "VV".
+    - No "IC".
+    - No "IIV".
+    - No "XM".
+    - No "MMMM".
+    - No "VX".
+    - No "LC".
+    - No "DM".
+
+    Everything is covered.
+
+    Final check on `add`:
+    `add("X", "V")` $\rightarrow$ `fromRoman("X")`=10, `fromRoman("V")`=5, `toRoman(15)`="XV". Correct.
+    `add("MMM", "M")` $\rightarrow$ `fromRoman("MMM")`=3000, `fromRoman("M")`=1000, `toRoman(4000)` $\rightarrow$ throws `\InvalidArgumentException`. Correct.
+
+    One minor thing: `preg_match` is slightly more efficient if I don't check `$s === ''` separately, as `+` handles it.
+    `if (!preg_match('/^[IVXLCDM]+$/', $s))` is sufficient.
+
+    Wait, the requirement for `fromRoman` says:
+    "Anything else throws `\InvalidArgumentException`: empty string, lowercase letters, surrounding whitespace, other characters, and non-canonical forms..."
+    My code:
+    - Empty string: `preg_match` returns 0, throws.
+    - Lowercase: `preg_match` returns 0, throws.
+    - Whitespace: `preg_match` returns 0, throws.
+    - Other characters: `preg_match` returns 0, throws.
+    - Non-canonical: `toRoman` check throws.
+
+    Wait, what if `fromRoman` is called with `" IV"` (leading space)?
+    `preg_match` returns 0. Throws. Correct.
+
+    What if `fromRoman` is called with `"IV "` (trailing space)?
+    `preg_match` returns 0. Throws. Correct.
+
+    What if `fromRoman` is called with `"IV\n"`?
+    `preg_match` returns 0. Throws. Correct.
+
+    The `preg_match` is very strict.
+
+    Final code structure:
+    ```php
+    <?php
+
+    final class RomanNumerals
+    {
+        public static function toRoman(int $n): string
+        {
+            // ...
+        }
+
+        public static function fromRoman(string $s): int
+        {
+            // ...
+        }
+
+        public static function add(string $a, string $b): string
+        {
+            // ...
+        }
+    }
+    ```
+
+    Wait, I should make sure the `toRoman` map is defined inside the method or as a constant. Inside the method is fine and keeps it self-contained.
+
+    One last check on `fromRoman`'s `total` calculation:
+    `$current < $next` logic is the standard way to parse Roman numerals.
+    `IV`: `I` (1) < `V` (5) $\rightarrow$ `total = -1`. Next loop `V` (5) $\ge$ 0 $\rightarrow$ `total = -1 + 5 = 4`.
+    `VI`: `V` (5) $\ge$ `I` (1) $\rightarrow$ `total = 5`. Next loop `I` (1) $\ge$ 0 $\rightarrow$ `total = 5 + 1 = 6`.
+    `MCMXCIV`:
+    M (1000) $\ge$ C (100) $\rightarrow$ 1000
+    C (100) < M (1000) $\rightarrow$ 1000 - 100 = 900
+    M (1000) $\ge$ X (10) $\rightarrow$ 900 + 1000 = 1900
+    X (10) < C (100) $\rightarrow$ 1900 - 10 = 1890
+    C (100) $\ge$ I (1) $\rightarrow$ 1890 + 100 = 1990
+    I (1) < V (5) $\rightarrow$ 1990 - 1 = 1989
+    V (5) $\ge$ 0 $\rightarrow$ 1989 + 5 = 1994.
+    Correct.
+
+    Wait, I just noticed a potential issue in my manual trace of `MCMXCIV`.
+    Let's re-trace `MCMXCIV` carefully.
+    $s = "MCMXCIV"$
+    $i=0, s[0]=M, current=1000, next=C(100). 1000 < 100$ is false. $total = 1000$.
+    $i=1, s[1]=C, current=100, next=M(1000). 100 < 1000$ is true. $total = 1000 - 100 = 900$.
+    $i=2, s[2]=M, current=1000, next=X(10). 1000 < 10$ is false. $total = 900 + 1000 = 1900$.
+    $i=3, s[3]=X, current=10, next=C(100). 10 < 100$ is true. $total = 1900 - 10 = 1890$.
+    $i=4, s[4]=C, current=100, next=I(1). 100 < 1$ is false. $total = 1890 + 100 = 1990$.
+    $i=5, s[5]=I, current=1, next=V(5). 1 < 5$ is true. $total = 1990 - 1 = 1989$.
+    $i=6, s[6]=V, current=5, next=0. 5 < 0$ is false. $total = 1989 + 5 = 1994$.
+    Yes, it is correct.
+
+    The `toRoman` method uses a greedy approach which is standard for the subtractive form.
+    The `fromRoman` method uses the subtractive logic to get the integer, then validates canonicality by re-encoding. This is a very clean way to satisfy the "canonical only" requirement.
+
+    Final check on `add`'s error handling:
+    If `add("X", "invalid")` is called:
+    `fromRoman("X")` returns 10.
+    `fromRoman("invalid")` throws `\InvalidArgumentException`.
+    `add` propagates it. Correct.
+
+    If `add("MMM", "M")` is called:
+    `fromRoman("MMM")` returns 3000.
+    `fromRoman("M")` returns 1000.
+    `toRoman(4000)` throws `\InvalidArgumentException`.
+    `add` propagates it. Correct.

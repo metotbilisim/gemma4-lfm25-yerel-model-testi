@@ -1,0 +1,678 @@
+We need to write PHP 8.4 code containing a final class RomanNumerals (no namespace). The class must have static methods: toRoman(int $n): string, fromRoman(string $s): int, add(string $a, string $b): string.
+
+Requirements:
+
+- toRoman: convert numbers 1..3999 inclusive to Roman numeral in standard subtractive form. Must throw \InvalidArgumentException for any other number (i.e., <=0 or >3999). Also presumably must handle non-integer? The type is int, but we can check if not integer? We'll assume int.
+
+- fromRoman: convert a Roman numeral back to an integer. It must accept only canonical numerals, i.e., exactly the strings that toRoman produces. So we need to validate that input string is a valid canonical Roman numeral (the output of toRoman). That means we need to check that it's not empty, only uppercase letters I,V,X,L,C,D,M, and matches the pattern for canonical representation.
+
+Specifically: The allowed forms are standard subtractive notation: e.g., 1=I, 4=IV, 5=V, 9=IX, 10=X, 14=XIV? Actually standard Roman numerals: I=1, V=5, X=10, L=50, C=100, D=500, M=1000. Subtractives: IV (4), IX (9), XL (40), XC (90), CD (400), CM (900). Also can have multiple additive pieces: e.g., 58 = LVIII? Actually 58 = LVIII (50+5+3). The canonical representation is unique.
+
+Thus fromRoman must check that the string is exactly a valid canonical numeral. This includes checking that there are no invalid sequences like "IIII", "VV", "IC", "IIV", "XM", "MMMM", "VX", "LC", "DM". Also empty string, lowercase letters, surrounding whitespace, other characters -> throw.
+
+Implementation approach: We'll implement toRoman using a mapping of values to symbols in descending order, building the numeral. Standard algorithm: iterate through array of pairs (value, symbol) and subtract.
+
+We need to ensure that only numbers 1..3999 are allowed; else throw \InvalidArgumentException.
+
+For fromRoman: parse the string, compute integer sum by scanning left to right: if current value < next value, subtract current; else add. But we must also verify canonical form. There are multiple ways:
+
+- Validate that the string matches a regex pattern for canonical Roman numerals. Could define a regex: ^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$ . This is standard regex for canonical Roman numerals (1-3999). That ensures correct subtractive pairs and limited repetitions: I can appear up to 3 times, X up to 3, etc. Also ensures no invalid sequences like "IC" (100 before 1? Actually IC is not allowed because you cannot have I before C (100) as a subtractive pair; only allowed subtractive pairs are those listed). The regex will reject them.
+
+Thus we can implement fromRoman: first check if string is empty -> throw. Trim whitespace? The spec says surrounding whitespace invalid, so we must not allow any whitespace. So we should not trim; just check that the string contains only uppercase letters I,V,X,L,C,D,M and matches the regex. Also ensure length >0.
+
+If passes regex, then compute integer using algorithm: iterate over characters, mapping each char to its value (I=1, V=5, X=10, L=50, C=100, D=500, M=1000). For each char at index i, if i+1 < length and value[i] < value[i+1], subtract value[i]; else add. That yields integer.
+
+But we must also ensure that the computed integer is in range 1..3999? Actually canonical roman numerals only defined up to 3999. If fromRoman receives a valid canonical numeral, it will be between 1 and 3999 inclusive. But we can still check that result is within that range; if not, throw.
+
+Now add: static method add(string $a, string $b): string. It must add two Roman numerals and return the result as a Roman numeral. Must throw \InvalidArgumentException if either input is invalid (i.e., not a canonical roman numeral) or sum out of range (>3999). So we need to validate both a and b using fromRoman? But fromRoman expects canonical; if they are invalid, we must throw. However, fromRoman also throws for invalid. So we can call fromRoman($a) and fromRoman($b) to get ints. If either throws, propagate. Then compute sum = $i + $j. If sum < 1 or > 3999? Actually min sum is at least 2 (if both are at least 1). But if sum > 3999, throw \InvalidArgumentException. Then convert sum to roman using toRoman.
+
+Edge Cases: Input strings may be valid canonical but produce numbers outside range? Not possible because canonical only defined up to 3999. However, fromRoman will accept any canonical string; but we must ensure that the sum is within 1..3999 inclusive. If sum > 3999, throw.
+
+Potential issues: The spec says "any other number throws \InvalidArgumentException" for toRoman. For add, "throws \InvalidArgumentException if either input is invalid or the sum is out of range."
+
+Thus we need to implement:
+
+- static function toRoman(int $n): string
+- static function fromRoman(string $s): int
+- static function add(string $a, string $b): string
+
+All static.
+
+No namespace: final class RomanNumerals { ... }
+
+We must not print anything; no test/demo code. Just define the class and methods.
+
+Implementation details:
+
+- Use private static const? We'll implement mapping arrays.
+
+toRoman:
+
+```
+public static function toRoman(int $n): string {
+    if ($n < 1 || $n > 3999) {
+        throw new \InvalidArgumentException('Number out of range');
+    }
+    $values = [
+        1000 => 'M',
+        900 => 'CM',
+        500 => 'D',
+        400 => 'CD',
+        100 => 'C',
+        90 => 'XC',
+        50 => 'L',
+        40 => 'XL',
+        10 => 'X',
+        9 => 'IX',
+        5 => 'V',
+        4 => 'IV',
+        1 => 'I',
+    ];
+    $result = '';
+    foreach ($values as $value => $symbol) {
+        while ($n >= $value) {
+            $result .= $symbol;
+            $n -= $value;
+        }
+    }
+    return $result;
+}
+```
+
+But careful: Since we are using integer values as keys, but PHP arrays can have integer keys; fine.
+
+Alternatively, use ordered list of pairs descending: [1000,'M'], [900,'CM'] etc. That's typical.
+
+Now fromRoman:
+
+We need to validate canonical form via regex.
+
+Define regex pattern:
+
+```
+$pattern = '/^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/';
+```
+
+This matches 1-3999 canonical.
+
+But need to ensure that string is uppercase letters only. The regex will enforce that because characters are limited. However, if there are lowercase letters, they won't match; but we also need to explicitly reject empty string and whitespace. So before applying regex, check: if ($s === '') throw. Also check that $s === ltrim($s) && $s === rtrim($s) (no surrounding whitespace). But simpler: just rely on regex: pattern requires start and end anchors; whitespace would break.
+
+But also need to reject characters other than M,D,C,L,X,V,I. The regex only includes those letters, so any other char fails.
+
+Thus:
+
+```
+public static function fromRoman(string $s): int {
+    if ($s === '') {
+        throw new \InvalidArgumentException('Empty string');
+    }
+    // Validate canonical form
+    if (!preg_match('/^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+        throw new \InvalidArgumentException('Invalid Roman numeral');
+    }
+    // Convert to integer
+    $map = [
+        'I' => 1,
+        'V' => 5,
+        'X' => 10,
+        'L' => 50,
+        'C' => 100,
+        'D' => 500,
+        'M' => 1000,
+    ];
+    $n = 0;
+    $len = strlen($s);
+    for ($i = 0; $i < $len; $i++) {
+        $curr = $map[$s[$i]];
+        if ($curr === null) {
+            // Should not happen due to regex
+            throw new \InvalidArgumentException('Invalid character');
+        }
+        if (isset($s[$i+1]) && $curr < $map[$s[$i+1]]) {
+            $n -= $curr;
+        } else {
+            $n += $curr;
+        }
+    }
+    // Ensure within range
+    if ($n < 1 || $n > 3999) {
+        throw new \InvalidArgumentException('Out of range');
+    }
+    return $n;
+}
+```
+
+But note: The regex ensures canonical forms; but also ensures that numbers like "IIII" (invalid) are rejected. Good.
+
+Now add:
+
+```
+public static function add(string $a, string $b): string {
+    try {
+        $valA = RomanNumerals::fromRoman($a);
+        $valB = RomanNumerals::fromRoman($b);
+    } catch (\InvalidArgumentException $e) {
+        throw $e;
+    }
+    $sum = $valA + $valB;
+    if ($sum < 1 || $sum > 3999) {
+        throw new \InvalidArgumentException('Sum out of range');
+    }
+    return RomanNumerals::toRoman($sum);
+}
+```
+
+But the spec says: "throws \InvalidArgumentException if either input is invalid or the sum is out of range."
+
+Thus we need to catch fromRoman errors and rethrow? Actually we can just let them propagate; but they are already \InvalidArgumentException. But we might want to wrap them in add's exception? Not needed.
+
+But ensure that if $a or $b invalid, we throw \InvalidArgumentException (the same type). That's fine.
+
+Now about the final class: final class RomanNumerals { ... }
+
+We need static methods inside.
+
+Potential issues:
+
+- The regex pattern must be correct for canonical forms. Let's test some examples:
+
+1 -> I: Should match? Pattern: M{0,3} (empty) then (CM|CD|D?C{0,3}) - for 1: D?C{0,3} can be empty; then (IX|IV|V?I{0,3}) -> V?I{0,3}: V is optional, I{0,3} can be "I". So matches.
+
+4 -> IV: pattern: M{0,3} (empty) then (CM|CD|D?C{0,3}) empty; then (IX|IV|V?I{0,3}) -> "IV" matches. Good.
+
+1994 -> MCMXCIV: Let's see: M (1000), CM (900) => M{1} + CM; XC (90); IV (4). The pattern should match.
+
+Now test invalid forms:
+
+- "IIII": Should not match because V?I{0,3} allows up to 3 I's. "IIII" has 4 I's -> fails.
+
+- "VV": V?I... no V repeated; but V?C? Actually pattern doesn't allow V twice. So fails.
+
+- "IC": I before C (100) is not allowed: The pattern for thousands/minutes: M part, then hundreds part etc. For 1000-3999, after M part, we have (CM|CD|D?C{0,3}) which includes up to 3 C's but also D? optionally. But "IC" would be parsed as: M part empty; hundreds part: maybe "C"? Actually "IC": I=1, C=100. The pattern expects at the end (IX|IV|V?I{0,3}) for units. But "IC" is not allowed because after hundreds part we have I? Not match. So fails.
+
+- "IIV": Should be invalid: pattern doesn't allow that.
+
+- "XM": X=10 before M=1000; not allowed.
+
+- "MMMM": >3999, but pattern M{0,3} only allows up to three Ms, so fails.
+
+- "VX": V=5 then X=10; pattern for tens: (XC|XL|L?X{0,3}) - L?X{0,3} can be X's only. So fails.
+
+- "LC": L=50 before C=100; not allowed.
+
+- "DM": D=500 before M=1000; not allowed.
+
+Thus regex works.
+
+Now about toRoman: Ensure that we produce canonical forms. The algorithm using the mapping with subtractive pairs yields standard form.
+
+Edge Cases:
+
+- Input 0 or negative: throw.
+
+- Input >3999: throw.
+
+Now add: Must also ensure sum within range. Since both inputs are canonical (1..3999), sum can be up to 7998, but if sum >3999 we must throw. So check.
+
+Potential issues: If fromRoman returns integer for valid roman, but due to regex it's guaranteed canonical. Then sum may exceed 3999; we throw.
+
+Now about exception messages: Not specified; just need to throw the exception type.
+
+Thus final code:
+
+```
+<?php
+final class RomanNumerals
+{
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+        $values = [
+            1000 => 'M',
+            900 => 'CM',
+            500 => 'D',
+            400 => 'CD',
+            100 => 'C',
+            90 => 'XC',
+            50 => 'L',
+            40 => 'XL',
+            10 => 'X',
+            9 => 'IX',
+            5 => 'V',
+            4 => 'IV',
+            1 => 'I',
+        ];
+        $result = '';
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty string');
+        }
+        // Validate canonical form using regex
+        if (!preg_match('/^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+            throw new \InvalidArgumentException('Invalid Roman numeral');
+        }
+        $map = [
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+        ];
+        $n = 0;
+        $len = strlen($s);
+        for ($i = 0; $i < $len; $i++) {
+            $char = $s[$i];
+            $curr = $map[$char] ?? null;
+            if ($curr === null) {
+                // Should not happen due to regex
+                throw new \InvalidArgumentException('Invalid character');
+            }
+            if (isset($s[$i + 1])) {
+                $next = $map[$s[$i + 1]];
+                if ($curr < $next) {
+                    $n -= $curr;
+                    continue;
+                }
+            }
+            $n += $curr;
+        }
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Out of range');
+        }
+        return $n;
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        try {
+            $valA = RomanNumerals::fromRoman($a);
+            $valB = RomanNumerals::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+        $sum = $valA + $valB;
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+        return RomanNumerals::toRoman($sum);
+    }
+}
+?>
+```
+
+But need to ensure that the regex pattern is correct: The pattern includes optional groups. Let's test mental:
+
+- For number 1: M{0,3} matches empty; (CM|CD|D?C{0,3}) matches empty (since D?C{0,3} can be empty). Then (XC|XL|L?X{0,3}) matches empty. Then (IX|IV|V?I{0,3}) matches "I". So overall matches.
+
+- For 4: "IV": M part empty; hundreds empty; tens empty; units: "IV" matches (IV). Good.
+
+- For 1994: MCMXCIV: Let's see: M (1000) -> M. Then CM (900) -> matches (CM). Then XC (90) -> matches (XC). Then IV (4) -> matches (IV). So pattern works.
+
+Thus regex is fine.
+
+Potential bug: In fromRoman, we used `$map[$s[$i + 1]]` but if $i+1 is out of range? We check inside loop: if (isset($s[$i + 1])) ... else. That's okay.
+
+But we also need to ensure that the regex ensures uppercase letters only; but if input contains lowercase, preg_match fails -> throws.
+
+Now about add: We used RomanNumerals::fromRoman($a) etc. Since static method call inside static method must be within class context. In PHP, you can call static methods using ::. That's fine.
+
+But we need to ensure that the method signatures are correct: add returns string.
+
+Now about exception handling: The spec says "throws \InvalidArgumentException". We are throwing that type for invalid inputs. Good.
+
+Potential improvements: Use final class; no namespace.
+
+Now check that toRoman throws for numbers outside 1..3999. Already done.
+
+Now test some cases manually:
+
+- toRoman(1) => "I". Works.
+
+- toRoman(4) => "IV". Works.
+
+- toRoman(1994) => "MCMXCIV". Let's simulate: values descending: 1000 M -> n=1994-1000=994; next 900 CM -> n=94; then 500 D? no; 400 CD? no; 100 C? 94<100, skip; 90 XC -> n=4; 50 L? no; 40 XL? no; 10 X? no; 9 IX? no; 5 V? no; 4 IV -> n=0. So result "M"+"CM"+"XC"+"IV" = "MCMXCIV". Good.
+
+- fromRoman("MCMXCIV") -> parse: M=1000, C? Actually algorithm: iterate: M(1000) next is C (100) less than 1000? No, so add 1000. Then C (100) next is M? Actually string "MCMXCIV": characters: M C M X C I V? Wait actual string: M CM XC IV? Let's break: M (1000), CM (900) -> but algorithm sees M then C: Since C < M? Actually we treat each char individually: M=1000, next is C=100; since 1000 > 100, add. Then C=100, next is M=1000; since 100 < 1000, subtract 100 (so -100). Then M=1000, next X=10? Actually after "CM" we have "XC": characters: ... Let's just trust algorithm yields correct integer: Should be 1994.
+
+Our fromRoman uses the standard additive/subtractive algorithm; it works for canonical forms.
+
+Now test invalid inputs:
+
+- fromRoman("") -> throws.
+
+- fromRoman(" IV") (with space) -> regex fails due to whitespace, throws.
+
+- fromRoman("iiii") -> lowercase fails regex, throws.
+
+- fromRoman("IIII") -> regex fails.
+
+- fromRoman("VV") -> regex fails.
+
+- fromRoman("IC") -> fails.
+
+Thus good.
+
+Now add: Suppose a="I", b="III" => 1+3=4 => returns "IV". Works.
+
+If a="MMM" (3000) and b="M" (1000) => sum=4000 >3999 -> throw. Good.
+
+If a invalid like "IIII": fromRoman throws, add catches and rethrows same exception? Actually we catch \InvalidArgumentException and rethrow it. That's fine.
+
+Now final code: Must start with <?php and contain the class. No namespace. Provide final class.
+
+Potential issues: In PHP, static methods inside final class must be declared static. We did that.
+
+Now ensure no extraneous output. The file ends after class definition; no echo or print.
+
+Thus final answer is a single code block:
+
+```php
+<?php
+final class RomanNumerals
+{
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+        $values = [
+            1000 => 'M',
+            900 => 'CM',
+            500 => 'D',
+            400 => 'CD',
+            100 => 'C',
+            90 => 'XC',
+            50 => 'L',
+            40 => 'XL',
+            10 => 'X',
+            9 => 'IX',
+            5 => 'V',
+            4 => 'IV',
+            1 => 'I',
+        ];
+        $result = '';
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty string');
+        }
+        // Validate canonical form using a regex that matches only proper Roman numerals 1-3999
+        if (!preg_match('/^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+            throw new \InvalidArgumentException('Invalid Roman numeral');
+        }
+        $map = [
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+        ];
+        $n = 0;
+        $len = strlen($s);
+        for ($i = 0; $i < $len; $i++) {
+            $char = $s[$i];
+            $curr = $map[$char] ?? null;
+            if ($curr === null) {
+                // Should not happen due to regex validation
+                throw new \InvalidArgumentException('Invalid character');
+            }
+            if (isset($s[$i + 1])) {
+                $next = $map[$s[$i + 1]];
+                if ($curr < $next) {
+                    $n -= $curr;
+                    continue;
+                }
+            }
+            $n += $curr;
+        }
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Out of range');
+        }
+        return $n;
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        try {
+            $valA = RomanNumerals::fromRoman($a);
+            $valB = RomanNumerals::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+        $sum = $valA + $valB;
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+        return RomanNumerals::toRoman($sum);
+    }
+}
+?>
+```
+
+We need to ensure that the regex pattern is correct: The pattern includes optional groups; but we must be careful about parentheses. Let's test with some known strings.
+
+Test "MCMXCIV": Should match.
+
+Regex: ^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$
+
+Breakdown:
+
+- M{0,3} matches "M" (1 M)
+- Next group: (CM|CD|D?C{0,3}) -> "CM" matches.
+- Next group: (XC|XL|L?X{0,3}) -> "XC" matches.
+- Last group: (IX|IV|V?I{0,3}) -> "IV" matches.
+
+Thus matches.
+
+Test "III": Should match: M{0} (empty), hundreds empty, tens empty, units: V?I{0,3} => V? is absent, I{0,3} = "III". Good.
+
+Test "IV": matches last group: "IV".
+
+Test "IX": matches.
+
+Test "XL": matches.
+
+Test "XC": matches.
+
+Test "CD": matches.
+
+Test "CM": matches.
+
+Test "MCM": Actually "MCM" is 1900? That's M CM: M (1000) + CM (900) = 1900. The regex: M{1} then (CM|...)? Actually pattern: M{0,3} then (CM|CD|D?C{0,3}) etc. For "MCM": M{1} matches M; then group2: (CM|CD|D?C{0,3}) -> "CM"? But after M we have "CM"? Actually string is "MCM": characters: M C M. The pattern: M{0,3} matches "M". Then next group must match "CM"? But the remaining string is "CM". Yes, (CM|CD|D?C{0,3}) can match "CM". So group2 = "CM". Then group3: (XC|XL|L?X{0,3}) matches empty. Last group: (IX|IV|V?I{0,3}) matches empty. So overall matches. Good.
+
+Thus regex works.
+
+Now about fromRoman's algorithm: It uses the same mapping and subtracts when current < next. This yields correct integer for canonical forms.
+
+Potential bug: In fromRoman we used `$map[$s[$i + 1]]` but if $s[$i+1] is not a valid roman character (shouldn't happen due to regex). But we check $curr = $map[$char] ?? null; if null, throw. That's fine.
+
+Now about add: We catch and rethrow same exception. Could just let it propagate. But fine.
+
+Now final code includes <?php at top and ends with ?> (optional but typical). The spec didn't say we can't close the PHP tag; but it's okay. Usually you can end with ?>. It's not required. But safe to include closing tag? In many contexts, leaving it open is okay. But I'll keep it.
+
+Thus final answer: Provide code block.
+
+Potential improvements: Use proper exception messages? Not needed.
+
+Now check for any missing requirements:
+
+- final class RomanNumerals (no namespace) - done.
+
+- static methods: toRoman, fromRoman, add - done.
+
+- toRoman throws \InvalidArgumentException for numbers outside 1..3999 - done.
+
+- fromRoman throws \InvalidArgumentException for empty string, lowercase letters, surrounding whitespace, other characters, non-canonical forms - regex ensures uppercase and canonical; but we also need to check for whitespace: the regex anchors at start and end; whitespace would break. So it's covered.
+
+- add throws \InvalidArgumentException if either input invalid or sum out of range - done.
+
+- No printing, no test/demo code.
+
+Thus final code is ready.
+
+Potential minor issues:
+
+- In fromRoman we used preg_match with pattern containing forward slashes; fine.
+
+- The regex uses ^ and $ anchors. Good.
+
+- Ensure that toRoman's mapping order includes subtractive pairs before additive ones: We placed 900,400 etc before 500 etc. That's correct.
+
+Now check for any subtle bug: In toRoman we used foreach over array with integer keys; but PHP will iterate in order of array definition? Actually arrays maintain order. The values are defined in descending order: 1000,900,... So fine.
+
+Now test some numbers:
+
+- toRoman(3999) => "MMMCMXCIX"? Let's compute: 3000 = MMM, 900 = CM, 90 = XC, 9 = IX => "MMMCMXCIX". Our algorithm: while loops: 1000 repeated 3 times -> MMM; then 900 (CM) -> subtract 900 -> n=999? Actually after subtracting 3000, n=999. Then 900 <= 999 -> add CM (n becomes 99). Then 500 > 99 skip; 400 skip; 100 > 99 skip; 90 <=99 -> add XC (n=9); then 50 skip; 40 skip; 10 skip; 9 <=9 -> add IX (n=0). So result "MMM"+"CM"+"XC"+"IX" = "MMMCMXCIX". Good.
+
+- toRoman(1) => "I".
+
+- toRoman(3999) works.
+
+Now fromRoman: test "MMMCMXCIX" -> should parse correctly. Let's simulate quickly: M=1000, next M? Actually string: M M M C M X C I X? Wait actual: "MMMCMXCIX": characters: M M M C M X C I X? Actually it's 3 Ms then CM (900) then XC (90) then IX (9). The algorithm will compute correctly.
+
+Now check that fromRoman rejects "IIII". Regex fails. Good.
+
+Now add: Suppose a="I", b="III" => sum=4 -> toRoman(4) => "IV". Works.
+
+Now test sum out of range: a="MMM" (3000), b="M" (1000) => sum=4000 >3999 -> throw. Good.
+
+Now check that add also throws if either input invalid: e.g., a="IIII", b="V". fromRoman(a) throws, caught and rethrown. Good.
+
+Thus final code meets spec.
+
+Potential improvements: Ensure that toRoman's exception message is appropriate; but not required.
+
+Now produce final answer in a single ```php code block.
+
+We'll include the closing tag? Usually it's optional. But we can keep it.
+
+Thus final output:
+
+```php
+<?php
+final class RomanNumerals
+{
+    public static function toRoman(int $n): string
+    {
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Number must be between 1 and 3999');
+        }
+        $values = [
+            1000 => 'M',
+            900 => 'CM',
+            500 => 'D',
+            400 => 'CD',
+            100 => 'C',
+            90 => 'XC',
+            50 => 'L',
+            40 => 'XL',
+            10 => 'X',
+            9 => 'IX',
+            5 => 'V',
+            4 => 'IV',
+            1 => 'I',
+        ];
+        $result = '';
+        foreach ($values as $value => $symbol) {
+            while ($n >= $value) {
+                $result .= $symbol;
+                $n -= $value;
+            }
+        }
+        return $result;
+    }
+
+    public static function fromRoman(string $s): int
+    {
+        if ($s === '') {
+            throw new \InvalidArgumentException('Empty string');
+        }
+        // Validate canonical form using a regex that matches only proper Roman numerals 1-3999
+        if (!preg_match('/^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$/', $s)) {
+            throw new \InvalidArgumentException('Invalid Roman numeral');
+        }
+        $map = [
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            'L' => 50,
+            'C' => 100,
+            'D' => 500,
+            'M' => 1000,
+        ];
+        $n = 0;
+        $len = strlen($s);
+        for ($i = 0; $i < $len; $i++) {
+            $char = $s[$i];
+            $curr = $map[$char] ?? null;
+            if ($curr === null) {
+                // Should not happen due to regex validation
+                throw new \InvalidArgumentException('Invalid character');
+            }
+            if (isset($s[$i + 1])) {
+                $next = $map[$s[$i + 1]];
+                if ($curr < $next) {
+                    $n -= $curr;
+                    continue;
+                }
+            }
+            $n += $curr;
+        }
+        if ($n < 1 || $n > 3999) {
+            throw new \InvalidArgumentException('Out of range');
+        }
+        return $n;
+    }
+
+    public static function add(string $a, string $b): string
+    {
+        try {
+            $valA = RomanNumerals::fromRoman($a);
+            $valB = RomanNumerals::fromRoman($b);
+        } catch (\InvalidArgumentException $e) {
+            throw $e;
+        }
+        $sum = $valA + $valB;
+        if ($sum < 1 || $sum > 3999) {
+            throw new \InvalidArgumentException('Sum out of range');
+        }
+        return RomanNumerals::toRoman($sum);
+    }
+}
+?>
+```
+
+Check for syntax errors: The regex pattern uses forward slashes; fine.
+
+Potential issue: In fromRoman we used `$map[$s[$i + 1]]` but if $s[$i+1] is not a valid roman char, then $next = null and comparison fails? Actually if $s[$i+1] is invalid (shouldn't happen), then $next = null; then condition `$curr < $next` will cause error because comparing int to null? In PHP, null is treated as 0? Actually comparing int < null yields false? Let's see: In PHP, null is converted to 0 for numeric comparison? Actually in comparisons, null is considered less than any integer? Not sure. But since regex ensures only valid characters, it's fine.
+
+Now final code is ready.
+
+Potential minor improvements: Use `throw new \InvalidArgumentException` with appropriate messages; but not required.
+
+Thus answer.

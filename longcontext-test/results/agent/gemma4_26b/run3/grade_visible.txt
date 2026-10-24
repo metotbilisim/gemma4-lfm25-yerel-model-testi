@@ -1,0 +1,21 @@
+✔ BUG-103: coupon is valid on its validTo date (1.5126ms)
+✔ BUG-103: coupon is expired after its validTo date (0.534ms)
+✔ BUG-104: FIXED coupon allocation follows largest remainder method (0.2891ms)
+✔ BOGO coupon works correctly (0.1137ms)
+✔ refundOrder validation: invalid date (0.3168ms)
+✔ refundOrder validation: SKU not in order (0.2039ms)
+✔ refundOrder validation: too many units (0.1662ms)
+✔ dailySales: refunds on different day (0.3107ms)
+✔ money.format (0.5303ms)
+✔ simple order totals (0.6049ms)
+✔ percentage coupon is applied before VAT (BUG-101) (0.2248ms)
+✔ failed order leaves stock untouched (BUG-102) (0.3468ms)
+✔ partial refund basic (FEAT-200) (0.3416ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 84.3455

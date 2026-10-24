@@ -1,0 +1,1273 @@
+We need to write a Node.js (v24) CommonJS module that exports two functions: promisePool and retry. The module should be a single file with export via module.exports = { promisePool, retry }.
+
+We must implement:
+
+1. async function promisePool(taskFns, limit):
+- Input: taskFns is an array of zero-argument functions. Each may return a promise, return a plain value, or throw synchronously.
+- Run at most limit tasks concurrently. As soon as one finishes (either resolves or rejects), start the next one. So it's like a concurrency-limited executor with a queue.
+- Resolve with an array of results in same order as taskFns.
+- If any task rejects or throws, the returned promise rejects with that error immediately, and no new tasks are started after that point (tasks already running are left alone). So if a task throws synchronously, it's like its error is thrown at start; we should not start more tasks after that. But what about the currently running tasks? They continue to run; but we don't start new ones.
+- If limit is not a positive integer (0, -1, 1.5, "2", NaN), return promise rejects with TypeError.
+
+Edge Cases: limit must be a positive integer (>=1). So check Number.isInteger(limit) && limit > 0. If not, reject with TypeError.
+
+Implementation approach:
+
+We'll create a function that returns a Promise that resolves to array of results.
+
+Pseudo:
+
+async function promisePool(taskFns, limit) {
+   // Validate limit
+   if (!Number.isInteger(limit) || limit <= 0) {
+       return Promise.reject(new TypeError('limit must be a positive integer'));
+   }
+
+   const n = taskFns.length;
+   const results = new Array(n);
+   let completedCount = 0; // not needed maybe.
+
+   // We'll maintain an index of next task to start.
+   let nextIndex = 0;
+
+   // We need to keep track of running tasks: each is a promise that resolves with result (or rejects).
+   // When a task finishes, we set results[taskIndex] = result or throw error.
+
+   // If limit <= n, we can start up to limit tasks initially. If limit > n, just run all tasks sequentially? Actually concurrency limited by limit but if fewer tasks than limit, we just run them all (but still as soon as one finishes, start next). So basically we need to keep a queue.
+
+   // We'll implement using async functions and a loop that starts tasks while count < limit and nextIndex < n. But also need to handle when tasks finish: if the promise resolves/rejects, we need to schedule next task.
+
+   // Since we need to return a promise that resolves after all tasks done (or rejects on first error). So we can implement as:
+
+   const executing = new Set(); // store promises? Not needed.
+
+   // We'll create a function to run a single task: async function runTask(idx) {
+   //   try { const result = await taskFns[idx](); results[idx] = result; } catch (e) { results[idx] = e; // but we need to reject overall. Actually we need to capture error and propagate.
+   // }
+   // But if any error occurs, we must not start new tasks after that point. So we need a flag: let hasError = false; let error = null;
+
+   // When an error occurs, we should stop launching new tasks (i.e., not start more). However tasks already running continue to finish and fill results.
+
+   // Implementation details:
+
+   let running = 0;
+   let next = 0;
+   const errors = [];
+
+   // We'll use a loop that runs while there are pending tasks and either no tasks currently running or we can start new ones after a completion.
+
+   // Simpler: Use a queue of tasks. We'll maintain a list of "pending" indices. At start, push up to limit tasks onto an array of promises.
+
+   // Approach: Use a while loop that runs until all tasks done. Keep track of count of completed tasks (or total tasks). But we need to schedule new tasks when capacity available and there are pending tasks.
+
+   // Let's implement with a custom executor:
+
+   const results = new Array(n);
+   let active = 0;
+   let nextIdx = 0;
+
+   // We'll define an async function that processes tasks:
+   async function processQueue() {
+       while (nextIdx < n) {
+           if (active >= limit) {
+               // Wait for one to finish
+               await Promise.race(/* ??? */); // Not straightforward.
+
+               // Actually we need to wait for any of the currently running tasks to finish; but we don't have a list of promises. We could keep an array of active promises: let activePromises = [].
+
+               // Let's maintain an array of currently running promises: const runningPromises = [].
+               // When we start a task, push its promise onto array.
+               // When it resolves/rejects, remove from array and set results.
+
+               // So:
+
+               // if (active >= limit) {
+               //   await Promise.race(runningPromises); // Wait for any to finish
+               // }
+
+           }
+       }
+   }
+
+   // But we also need to handle errors: if any task throws or rejects, the outer promise must reject with that error immediately, and stop launching new tasks.
+
+   // So when a running task fails (rejects), we need to capture that error, set a flag, and not start more tasks. The other tasks already running may still finish; but their results should be ignored? Actually spec: "If any task rejects or throws, the returned promise rejects with that error immediately, and no new tasks are started after that point (tasks already running are simply left alone)." So we can let them continue to run; they might resolve later. But we don't need to use their results. However we must not start more tasks.
+
+   // Implementation: When a task's promise rejects (or throws), we catch it in the wrapper for that task. If error occurs, set error = e; and set a flag shouldStop = true. Then after that, we stop launching new tasks. But we still need to wait for all currently running tasks to finish before the outer promise resolves/rejects? The spec says "the returned promise rejects with that error immediately". That suggests that the rejection should happen as soon as the first error occurs, not waiting for other tasks. However we cannot interrupt already-running tasks; they will continue but their results are irrelevant.
+
+   // So after an error, we need to stop launching new tasks and wait for currently running tasks (maybe) to finish? The outer promise rejects with that error. Should it resolve or reject? It should reject with the error. The spec: "If any task rejects or throws, the returned promise rejects with that error immediately". So after error we can reject the outer promise; but we need to ensure that no new tasks are started. The currently running tasks may still be pending; they will finish eventually. But the outer promise is already in rejection state; we cannot resolve later. However we could still wait for them to finish before rejecting? That would cause a delay and maybe not "immediately". Usually you'd reject immediately, but you can't stop the currently running tasks. The spec says "tasks already running are simply left alone". So we can let them run; but after error, we should not schedule new tasks. The outer promise will reject with that error as soon as the first error occurs (i.e., when the task's promise rejects). But if the task is still running, we can't wait for it to finish before rejecting? Actually we could detect the rejection event and then reject the outer promise right away (maybe after awaiting the rejection). That's fine.
+
+   // Implementation details: We'll have a wrapper function runTask(idx) that returns a promise. Inside:
+
+   async function runTask(idx) {
+       try {
+           const result = await taskFns[idx](); // may throw or return a promise
+           results[idx] = result;
+           return result;
+       } catch (e) {
+           results[idx] = e; // store error for potential later? Not needed.
+           throw e; // rethrow to propagate to outer rejection
+       }
+   }
+
+   // Then in the main loop, we start tasks up to limit.
+
+   // We'll maintain a list of active promises: let activePromises = [].
+
+   // Pseudocode:
+
+   const n = taskFns.length;
+   const results = new Array(n);
+   let nextIdx = 0;
+   let activeCount = 0;
+   let hasError = false;
+   let errorVal = null;
+
+   async function startNext() {
+       if (nextIdx >= n || activeCount >= limit) return;
+       const idx = nextIdx++;
+       activeCount++;
+       try {
+           const p = runTask(idx);
+           // Wait for p to settle
+           await p;
+           // When it resolves, results already set.
+           // If error occurred earlier, we might have already stopped launching new tasks; but still need to decrement activeCount.
+           activeCount--;
+       } catch (e) {
+           if (!hasError) {
+               hasError = true;
+               errorVal = e;
+               // Do not start more tasks after this.
+               // But we still need to let the current task's rejection propagate, which is already thrown.
+               // We'll just return a rejected promise that will cause outer rejection.
+           }
+           activeCount--;
+       }
+   }
+
+   // Actually runTask returns a promise that resolves or rejects. The catch inside runTask rethrows; so startNext will get a rejected promise and can handle.
+
+   // But we need to ensure that after an error, no more tasks are started: i.e., when activeCount >= limit or hasError true, we don't call startNext.
+
+   // We'll have a loop:
+
+   while (nextIdx < n) {
+       if (activeCount >= limit) {
+           // Wait for one of the active tasks to finish.
+           await Promise.race(activePromises); // but we need list of active promises.
+       } else if (!hasError) {
+           startNext();
+       } else {
+           // Already errored, just wait for active tasks to finish? Not needed maybe; but to avoid infinite loop we can just wait for all tasks to complete (including those already running). But since we are not starting new ones, we need to wait until activeCount becomes 0. So we can await Promise.all(activePromises) after loop ends.
+       }
+   }
+
+   // At the end, if hasError, reject outer promise with errorVal; else resolve with results.
+
+   // However we need to manage activePromises: each startNext adds a promise to array; when it settles (resolve or reject), we should remove it. Since we are using await on p in startNext, we can push and pop accordingly.
+
+   // Let's implement more straightforward:
+
+   // We'll use a function that runs tasks in a controlled concurrency loop:
+
+   async function promisePool(taskFns, limit) {
+       if (!Number.isInteger(limit) || limit <= 0) {
+           return Promise.reject(new TypeError('limit must be a positive integer'));
+       }
+
+       const n = taskFns.length;
+       const results = new Array(n);
+       let nextIdx = 0;
+       let activeCount = 0;
+       let hasError = false;
+       let error = null;
+
+       // We'll keep an array of currently running promises for waiting.
+       const running = [];
+
+       // Define a function to execute a single task and store result or throw.
+       async function execute(idx) {
+           try {
+               const ret = await taskFns[idx]();
+               results[idx] = ret;
+               return ret;
+           } catch (e) {
+               results[idx] = e; // Not needed but okay
+               throw e;
+           }
+       }
+
+       // Start initial tasks up to limit
+       for (let i = 0; i < Math.min(n, limit); i++) {
+           await startTask(i);
+       }
+
+       // Wait until all tasks are done or error occurs.
+       // We'll use a loop that waits for either an error or completion of all tasks.
+
+       // Actually we need to keep launching tasks as soon as capacity frees up. So after each task finishes (resolve or reject), we call startNext if there are pending tasks and not errored.
+
+       // Let's implement using a while loop:
+
+       while (nextIdx < n) {
+           if (activeCount >= limit) {
+               // Wait for any active task to finish
+               await Promise.race(running);
+               // After race, some tasks may have completed; running array will be updated inside execute.
+               // But we need to clear completed ones from running list. We'll handle by removing after each await? Actually we can't easily know which one finished.
+
+               // Instead of using Promise.race with running list, we could use a queue and just await each task sequentially: but that would not be concurrent.
+
+               // Alternative: Use a simple approach: start tasks in batches of limit, but also allow immediate start after each finishes: we can keep a queue of pending indices; after each finish (caught via promise), we decrement activeCount and start next.
+
+               // Let's restructure:
+
+               // We'll have an async function runLoop that loops while there are pending tasks or active tasks. Use a set of running promises.
+
+               // Simpler: Use a custom concurrency limiter using a counter and a queue, but not waiting for batch.
+
+               // Implementation:
+
+               // We'll maintain a queue (array) of pending indices: let queue = [...taskFns.keys()]; but we need to map to indices.
+
+               // We'll have an async function processQueue that runs tasks until limit reached or queue empty. But we need to start new tasks as soon as one finishes.
+
+               // Let's implement using recursion: each time a task finishes, we schedule next.
+
+               // Approach: Use a while loop that checks if there are pending tasks and activeCount < limit -> start a new task; else if activeCount > 0 -> await a promise from running tasks (like waiting for any to finish). But we need to know which tasks are still pending.
+
+               // We'll keep an array of promises: let runningPromises = [].
+
+               // When we start a task, we push its promise onto runningPromises. In execute, after awaiting, the promise resolves/rejects and we can remove it from runningPromises (maybe using .pop? Not safe). Instead, we can just not keep track; after each await we know that particular task is done.
+
+               // But to wait for any of the currently running tasks, we can use Promise.race on an array of promises: runningPromises.slice().
+
+               // We'll do:
+
+               // while (nextIdx < n || activeCount > 0) {
+               //    if (activeCount < limit && nextIdx < n) {
+               //        startNext();
+               //    } else if (activeCount > 0) {
+               //        await Promise.race(runningPromises);
+               //    }
+               // }
+
+               // However, runningPromises must contain all currently active tasks' promises. We'll push when starting a task and remove after it settles? But we can't easily remove; but we can just keep them all; after they settle, they remain in array but the race will ignore them? Actually Promise.race returns the first settled promise among the set; if some have already settled (i.e., resolved/rejected), they are no longer pending; but they still exist in the array and will not be considered for future races? In JavaScript, once a promise settles, it stays settled; but Promise.race will keep returning the same settled promise each time? Actually Promise.race returns the first to settle when called; if you call again later, it may return the next one that hasn't settled yet (or the same if still pending). But if we keep adding new promises and never remove old ones, eventually the array grows large with resolved promises; but that's okay for small tasks.
+
+               // Simpler: Use a queue and a concurrency limit via a counter and a list of pending tasks. We'll start tasks until limit reached. Then after each task finishes (via .then), we decrement activeCount and start next if any pending.
+
+               // Let's implement using async functions with recursion:
+
+               // We'll define an internal async function runTaskWrapper(idx) that does the execution and then calls scheduleNext().
+
+               // Pseudocode:
+
+               async function runTaskWrapper(idx) {
+                   try {
+                       const result = await taskFns[idx]();
+                       results[idx] = result;
+                   } catch (e) {
+                       results[idx] = e;
+                       throw e; // propagate error
+                   } finally {
+                       activeCount--;
+                       scheduleNext(); // attempt to start next if possible
+                   }
+               }
+
+               function scheduleNext() {
+                   if (nextIdx < n && activeCount < limit) {
+                       const idx = nextIdx++;
+                       activeCount++;
+                       runTaskWrapper(idx).catch(() => {}); // we don't want unhandled rejection to break; but errors will be caught inside wrapper and rethrown, which will cause the outer promise to reject.
+                   }
+               }
+
+               // Initially start up to limit tasks:
+               for (let i = 0; i < Math.min(n, limit); i++) {
+                   activeCount++;
+                   runTaskWrapper(i);
+               }
+
+               // Wait until all tasks done: while (activeCount > 0 || nextIdx < n) { await new Promise(r => setTimeout(r, 0)); } Not ideal.
+
+               // Actually we need to wait for all tasks to finish. Since runTaskWrapper resolves after each task (or rejects). The outer promise should resolve when all tasks done and no error. If any error occurs, it should reject with that error.
+
+               // We can create a final promise that resolves when all tasks complete: we can use Promise.allSettled? But we need ordering of results; also need to capture first error.
+
+               // Simpler: Use the outer promise that will be returned from promisePool. Inside, after launching tasks, we wait for activeCount to become 0 (all done). But if an error occurs, we need to reject with that error. The wrapper rethrows errors; so if any task throws, the error will propagate up and cause the outer promise to reject. However we also need to stop launching new tasks after error: scheduleNext checks hasError? Actually scheduleNext is called in finally block of each task; but if an error occurs, we still decrement activeCount and call scheduleNext again (which may start new tasks). That's not allowed: after any error, no new tasks should be started. So we need to stop launching further tasks after the first error.
+
+               // Therefore we need a flag hasError that prevents starting new tasks. In runTaskWrapper, after catching error, set hasError = true; and also maybe throw to propagate outer rejection.
+
+               // But if we rethrow inside runTaskWrapper, it will cause the promise returned by runTaskWrapper to reject, which will be caught by .catch? Actually runTaskWrapper returns a promise that rejects on error. In scheduleNext we call runTaskWrapper(idx) and don't handle errors; but the outer promise (promisePool) is the one that will be returned. If any of the inner promises reject, they will cause the outer promise to reject? Not automatically unless we attach .catch to propagate. Since we are returning a promise from promisePool, if any of the child promises reject, the outer promise may also reject (if not handled). But we need to ensure that the first error is captured and used for rejection.
+
+               // Implementation plan:
+
+               // - Outer function returns a new Promise((resolve, reject) => { ... })
+               // - Inside, we set up state variables.
+               // - When an error occurs in any task (either sync throw or async rejection), we call reject(error) and also set a flag to stop launching new tasks. However, we must still wait for currently running tasks to finish before the outer promise settles (resolve or reject). But spec says "reject with that error immediately". That suggests we should reject as soon as the first error occurs; but we cannot interrupt already-running tasks. So we can call reject(error) right away, but we need to ensure that we don't start new tasks after that point.
+
+               // However, if we call reject while some tasks are still running (including ones that may later resolve), the outer promise will be in rejected state; but the currently running tasks continue. That's okay.
+
+               // So algorithm:
+
+               // - Outer Promise constructor with async function? Actually we can just return a promise that resolves/rejects based on events.
+
+               // Let's define:
+
+               const p = new Promise((resolve, reject) => {
+                   // state variables
+                   let hasError = false;
+                   let errorVal = null;
+
+                   // ... functions ...
+
+                   // When first error occurs:
+                   if (hasError) {
+                       // reject outer promise with errorVal
+                       reject(errorVal);
+                   } else {
+                       // resolve with results
+                       resolve(results);
+                   }
+               });
+
+               // But we need to ensure that after error, we don't start new tasks. So scheduleNext checks hasError.
+
+               // Implementation details:
+
+               // We'll have an async function runTask(idx) that returns a promise that resolves with result or rejects with error.
+
+               // In the outer promise, we will schedule tasks and wait for them to finish (or error). But we need to handle concurrency.
+
+               // Let's design step by step:
+
+               // 1. Validate limit; if invalid, return Promise.reject(new TypeError(...)).
+
+               // 2. Initialize:
+               //    const n = taskFns.length;
+               //    const results = new Array(n);
+               //    let nextIdx = 0;
+               //    let activeCount = 0;
+               //    let hasError = false;
+               //    let errorVal = null;
+
+               // 3. Define async function executeTask(idx):
+               //    try {
+               //        const ret = await taskFns[idx]();
+               //        results[idx] = ret;
+               //        return ret;
+               //    } catch (e) {
+               //        results[idx] = e; // maybe not needed
+               //        errorVal = e;
+               //        hasError = true;
+               //        throw e; // rethrow to propagate
+               //    }
+
+               // 4. Define function startNext():
+               //    if (nextIdx >= n || activeCount >= limit) return;
+               //    const idx = nextIdx++;
+               //    activeCount++;
+               //    executeTask(idx).then(() => {
+               //       // after task completes (resolve or reject?), but we already handle rejection inside executeTask.
+               //       // Actually executeTask returns a promise that resolves on success, rejects on error.
+               //       // Since errors are already thrown and set hasError flag, we don't need to do anything else.
+               //    }).catch(() => {
+               //       // If executeTask rejects, it's already handled; but we might want to ensure activeCount--? Actually executeTask will throw inside its try/catch and rethrow; the .then won't be called; .catch will be invoked. In catch we could decrement activeCount.
+               //    });
+               // However, if executeTask rejects, our outer promise should reject with that error. Since we already set hasError = true and errorVal = e, we can just let the outer rejection happen later.
+
+               // But we need to ensure that when an error occurs, we stop launching new tasks: scheduleNext checks hasError.
+
+               // Also need to wait for all tasks to finish before resolving/rejecting outer promise. We'll have a loop that runs while (nextIdx < n || activeCount > 0). Inside loop:
+
+               // if (!hasError) {
+               //    if (activeCount < limit && nextIdx < n) startNext();
+               // } else {
+               //    // Wait for active tasks to finish: await Promise.race(runningPromises)
+               // }
+
+               // But we need runningPromises list.
+
+               // Let's maintain an array of currently running promises: let running = [].
+
+               // In startNext():
+               //   const p = executeTask(idx);
+               //   running.push(p);
+               //   // When p settles, remove it from running? We'll just leave it; but for waiting we need to know when any finishes.
+
+               // To wait for any to finish: await Promise.race(running);
+
+               // However, after each await of p inside startNext, we don't need to do anything else.
+
+               // But the loop condition also needs to handle that tasks may complete while we are waiting for new ones.
+
+               // Let's try a simpler approach: Use a queue and concurrency limit via a counter and a set of pending tasks. We'll use a while loop that runs until both nextIdx >= n and activeCount === 0.
+
+               // Pseudocode:
+
+               const outer = new Promise((resolve, reject) => {
+                   let hasError = false;
+                   let errorVal = null;
+
+                   async function runTask(idx) {
+                       try {
+                           const result = await taskFns[idx]();
+                           results[idx] = result;
+                       } catch (e) {
+                           results[idx] = e;
+                           errorVal = e;
+                           hasError = true;
+                           throw e;
+                       }
+                   }
+
+                   async function startNext() {
+                       if (nextIdx >= n || activeCount >= limit || hasError) return;
+                       const idx = nextIdx++;
+                       activeCount++;
+                       // Execute and attach handlers to decrement activeCount when done.
+                       runTask(idx).then(() => {
+                           activeCount--;
+                           // after completion, try to start next
+                           if (nextIdx < n && activeCount < limit && !hasError) {
+                               startNext();
+                           }
+                       }).catch(() => {
+                           // If runTask rejects, activeCount must be decremented as well.
+                           activeCount--;
+                           // No further action needed; hasError already set.
+                       });
+                   }
+
+                   // Initial launch
+                   for (let i = 0; i < Math.min(n, limit); i++) startNext();
+
+                   // Wait until all tasks done or error occurs.
+                   // We'll use a timer to avoid busy loop: while (nextIdx < n || activeCount > 0) {
+                   //   if (!hasError) {
+                   //       // If there are pending tasks and capacity, startNext will be called inside runTask's .then
+                   //       // But we need to ensure we don't get stuck if activeCount >= limit and nextIdx < n but hasError is false.
+                   //       // Actually startNext will be called from within .then of each completed task; so loop may not need explicit waiting.
+                   //   } else {
+                   //       // Wait for active tasks to finish
+                   //       Promise.race(running).then(() => {});
+                   //   }
+                   // }
+
+               });
+
+               // This is getting messy.
+
+Maybe we can simplify: Since limit is at most some number, and tasks are independent, we could implement promisePool using a simple approach: run tasks in batches of limit, but also allow early start after each finishes. But the spec says "as soon as one finishes, start the next one (do not wait for a whole batch to finish)". That's essentially concurrency-limited pipeline.
+
+We can implement using a queue and a counter:
+
+- Use an async function that loops:
+   while (nextIdx < n) {
+       if (activeCount >= limit) {
+           // Wait for any currently running task to finish.
+           await Promise.race(runningPromises);
+       } else {
+           // Start next
+           const idx = nextIdx++;
+           activeCount++;
+           runningPromises.push(executeTask(idx));
+           // The executeTask returns a promise that resolves/rejects.
+           // We need to handle its completion: after it settles, we decrement activeCount and remove from runningPromises.
+           // But we can't easily remove from array; but we can just keep them all; the race will ignore resolved ones? Actually Promise.race will consider only pending promises; if a promise has already settled, it's no longer pending, so it won't be considered in future races. So we can leave them.
+
+           // However, after each startNext, we need to ensure that when the task finishes, we decrement activeCount and maybe start another one (if capacity). The loop will continue; but if activeCount < limit, next iteration will start next.
+
+           // But there is a problem: If we start a batch of tasks up to limit, then after each finishes, the loop will start the next one because activeCount < limit. That's correct.
+
+           // However, if limit > n, we just run all tasks sequentially (or concurrently up to n). The loop will start them all at once (since activeCount < limit and nextIdx < n). That's okay.
+
+   }
+
+But need to handle errors: If any task throws/rejects, we must reject the outer promise with that error immediately, and not start new tasks after that point. So when a task fails:
+
+- In executeTask, catch error, set hasError = true, errorVal = e, and rethrow.
+
+- The outer promise's rejection should happen as soon as the first error occurs. Since we are inside an async function (the outer Promise), we can call reject(errorVal) at that moment. But we also need to stop launching new tasks: scheduleNext checks hasError.
+
+- However, if we call reject early, we still need to wait for currently running tasks? The spec says "reject with that error immediately". So we could just reject right away; but the currently running tasks may still be pending. That's okay.
+
+But we also need to ensure that after rejecting, we don't continue the loop (like waiting for more tasks). We'll set a flag and exit loops.
+
+Implementation details:
+
+We'll create an async IIFE inside promisePool that returns a Promise.
+
+Pseudo-code:
+
+async function promisePool(taskFns, limit) {
+    if (!Number.isInteger(limit) || limit <= 0) {
+        return Promise.reject(new TypeError('limit must be a positive integer'));
+    }
+
+    const n = taskFns.length;
+    const results = new Array(n);
+    let nextIdx = 0;
+    let activeCount = 0;
+    let hasError = false;
+    let errorVal = null;
+
+    // We'll store the outer promise's resolve/reject functions.
+    return new Promise((resolve, reject) => {
+        // Define task runner
+        async function runTask(idx) {
+            try {
+                const ret = await taskFns[idx]();
+                results[idx] = ret;
+                return ret;
+            } catch (e) {
+                results[idx] = e;
+                errorVal = e;
+                hasError = true;
+                reject(e); // immediate rejection
+                throw e; // propagate for cleanup maybe
+            }
+        }
+
+        async function startNext() {
+            if (hasError) return;
+            if (nextIdx >= n || activeCount >= limit) return;
+            const idx = nextIdx++;
+            activeCount++;
+            // Execute and attach completion handler
+            runTask(idx)
+                .then(() => {
+                    activeCount--;
+                    // After this task finishes, try to start another if possible
+                    if (nextIdx < n && activeCount < limit && !hasError) {
+                        startNext();
+                    }
+                })
+                .catch(() => {
+                    // If runTask rejects, activeCount must be decremented as well.
+                    activeCount--;
+                    // No further action; hasError already set.
+                });
+        }
+
+        // Start initial batch
+        for (let i = 0; i < Math.min(n, limit); i++) {
+            startNext();
+        }
+
+        // Wait until all tasks are done or error occurred.
+        // We'll wait for activeCount to become 0 and nextIdx >= n.
+        // But if hasError is true, we reject already (in runTask). However, the outer promise's rejection will be triggered at that moment; but we still need to ensure that the function returns a promise that resolves/rejects appropriately. Since we used new Promise((resolve, reject) => {...}) and inside runTask we called reject(e), that will cause the outer promise to reject with that error. However, there may be multiple errors (if multiple tasks fail). The first one triggers reject; subsequent calls to reject will throw if called after the promise is already settled. That's okay.
+
+        // But we also need to wait for all currently running tasks to finish before the outer promise resolves (if no error). Since we started tasks via startNext, they may still be pending. The loop will continue until activeCount == 0 and nextIdx >= n. However, if an error occurs, reject is called immediately; but there might be pending tasks that haven't finished yet. That's okay.
+
+        // We'll add a wait loop:
+        const waitPromise = new Promise((wResolve) => {
+            // Wait until activeCount == 0 && nextIdx >= n
+            const check = setInterval(() => {
+                if (activeCount === 0 && nextIdx >= n) {
+                    clearInterval(check);
+                    wResolve();
+                }
+            }, 10);
+        });
+
+        // If no error, resolve with results after waitPromise resolves.
+        // But we must not resolve before rejecting if there was an error. Since runTask already called reject(e), the outer promise is already rejected; but we still need to handle the case where no error: after waitPromise resolves, call resolve(results).
+
+        // However, there's a problem: If an error occurs, runTask calls reject(e) and throws; but then the outer promise is already rejected. The code continues to start more tasks? No, because hasError becomes true, startNext checks hasError and returns.
+
+        // But we also need to ensure that after error, we don't keep waiting for active tasks to finish (the interval will still fire). That's fine; we just ignore.
+
+        waitPromise.then(() => {
+            if (!hasError) {
+                resolve(results);
+            } else {
+                // Already rejected via runTask's reject(e); but this will cause an unhandled rejection? Actually reject(e) was called inside runTask, which is inside the outer promise's executor. That should settle the promise. The extra resolve call here would be after the promise has already been rejected; calling resolve on a rejected promise is okay? In JavaScript, if you call resolve after the promise has settled (either fulfilled or rejected), it's ignored (no error). But to be safe, we can just not call resolve if hasError.
+
+                // Actually if hasError is true, the outer promise is already rejected; we should not resolve. So we can skip.
+            }
+        });
+
+    });
+}
+
+But there are issues: The runTask's catch calls reject(e) which will cause the outer promise to reject. However, after that, we also call activeCount-- in .catch block. That's fine.
+
+Potential issue: If an error occurs, we call reject(e) inside runTask, but then also later in .catch we decrement activeCount again (since runTask rejected). That's okay; activeCount may become negative? Let's see:
+
+- When runTask throws, it goes to catch block: sets hasError = true, errorVal = e, reject(e) called. Then throw e (to propagate). The .then and .catch handlers of the returned promise (runTask) will be executed: .then is not called because it rejected; .catch is called with the error. In .catch we do activeCount--. So activeCount decremented once. That's correct.
+
+But note that runTask also rethrows, causing the outer promise to reject. However, after reject(e), the outer promise is already settled; subsequent calls to resolve/reject will be ignored (or may throw if called after settlement). But we might call reject again? Not needed.
+
+Now about waiting for all tasks: The waitPromise checks activeCount===0 && nextIdx>=n. However, if an error occurs early, activeCount may still be >0 because some tasks are still running. The outer promise is already rejected; but the waitPromise will continue to wait until activeCount becomes 0 (i.e., all tasks finish). That's okay.
+
+But there is a subtlety: If limit is larger than n, we start all tasks at once (since loop runs min(n, limit)). That's fine.
+
+Now about ordering: results array is filled in order; each task sets its index result. At the end, resolve(results) will be in correct order.
+
+Edge Cases:
+
+- Empty taskFns: n=0. Should resolve to [].
+
+Our code: n=0, nextIdx=0, activeCount=0. The for loop runs min(0, limit) = 0 times. waitPromise will check activeCount===0 && nextIdx>=n (0>=0 true). So waitPromise resolves quickly; hasError false; resolve(results) => [] . Good.
+
+- limit invalid: return Promise.reject(new TypeError(...)). That's a promise that rejects with TypeError. That's fine.
+
+Now retry function:
+
+async function retry(fn, options = {}) {
+    const { retries = 3, delayMs = 0, factor = 2, shouldRetry = (err) => true } = options;
+    let attempt = 1;
+    let lastError = null;
+    while (true) {
+        try {
+            const result = await fn(attempt);
+            return result;
+        } catch (e) {
+            lastError = e;
+            // Check if we should retry
+            if (attempt >= retries || !shouldRetry(e)) {
+                // No more retries
+                throw e; // reject with last error
+            }
+            // Wait before retrying: delayMs * factor ** (attempt - 1)
+            const wait = delayMs * Math.pow(factor, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, wait));
+            attempt++;
+        }
+    }
+}
+
+But spec says: "If it rejects/throws, and fewer than retries retries have been made so far, and shouldRetry(err) returns true, wait delayMs * factor ** (attempt - 1) milliseconds and call fn again with the next attempt number."
+
+Note: attempt starts at 1. If first call fails, attempt=1; if retries=3, we can call up to retries+1 = 4 times? Actually spec: "fn is called at most retries + 1 times in total". So if retries=3, max calls = 4. Our loop condition: while(true) with attempt starting at 1; after each failure, if attempt <= retries (i.e., attempts made so far less than retries?), need to be careful.
+
+Let's define:
+
+- attempt is the current attempt number (starting at 1).
+- If call fails and attempt <= retries (i.e., we have remaining retries), then wait and increment attempt.
+- If attempt > retries, then no more retries; reject with last error.
+
+But also need to consider shouldRetry: if false, stop early.
+
+Implementation:
+
+let attempt = 1;
+while (true) {
+    try {
+        const result = await fn(attempt);
+        return result;
+    } catch (e) {
+        if (attempt > retries || !shouldRetry(e)) {
+            throw e; // reject with last error
+        }
+        const wait = delayMs * Math.pow(factor, attempt - 1);
+        await new Promise(resolve => setTimeout(resolve, wait));
+        attempt++;
+    }
+}
+
+But note: If attempt starts at 1 and retries=3, we allow attempts 1,2,3,4 (total 4). In loop: attempt=1 -> if fails, check if attempt > retries? 1 > 3 false; shouldRetry? maybe true. Then wait, attempt++ => attempt=2. Next iteration attempt=2 -> fails, check again. Continue until attempt=4? Actually after attempt=3 fails, we check: attempt > retries? 3 > 3 false; if shouldRetry true, wait and attempt becomes 4. Next iteration attempt=4: try call; if fails, attempt > retries (4>3) true => reject. So total calls: attempts 1..4 = retries+1. Good.
+
+But need to ensure that if shouldRetry returns false on first failure, we reject after that single call (i.e., no retry). That's correct.
+
+Edge Cases: delayMs could be 0; factor default 2; wait = 0 * ... = 0. So immediate retry.
+
+If fn throws synchronously, catch works.
+
+Now about options defaults: retries=3, delayMs=0, factor=2, shouldRetry=(err)=>true.
+
+Implementation details: Use destructuring with default values.
+
+Now combine both functions into module.exports.
+
+We need to write a CommonJS module (Node.js v24). So we can do:
+
+module.exports = { promisePool, retry };
+
+But the problem says "exports two functions: module.exports = { promisePool, retry };". So exactly that.
+
+Implementation must be self-contained, no external packages.
+
+Now test mental scenarios.
+
+Testing promisePool:
+
+Case 1: taskFns = [()=>Promise.resolve(1), ()=>Promise.resolve(2)], limit=1. Should run sequentially: first task starts, resolves, then second starts. Results should be [1,2].
+
+Our algorithm: startNext called initially up to min(n,limit) = 1. activeCount=1, nextIdx=1. runTask(0) executes; after it resolves, .then runs: activeCount-- => 0; then startNext checks nextIdx < n (1<2) and activeCount<limit (0<1) => startTask(1). Then after that resolves, activeCount-- => 0; nextIdx=2 >= n => stop. waitPromise will resolve after activeCount===0 && nextIdx>=n. Since no error, resolve(results) => [1,2]. Good.
+
+Case 2: limit > n: e.g., n=2, limit=5. startNext runs for i=0..min(2,5)=2 tasks concurrently (since activeCount < limit). That's okay; they run in parallel. After both finish, activeCount becomes 0, nextIdx=2 => waitPromise resolves. Works.
+
+Case 3: task throws synchronously: e.g., taskFns[0] = () => { throw new Error('boom'); }. In runTask, try block: await taskFns[idx]() throws; catch sets hasError=true, errorVal=err, rejects outer promise with err (immediately). Also activeCount++ before calling runTask? Actually we call startNext which increments activeCount before executing. If error occurs, we still decrement activeCount in .catch block. However, after reject(e), the outer promise is already settled; but we still have activeCount maybe >0. The waitPromise will continue waiting until activeCount becomes 0 (i.e., tasks finish). That's okay.
+
+But need to ensure that after error, we don't start new tasks: hasError flag prevents startNext from launching more tasks.
+
+Potential bug: In startNext, we call runTask(idx) and then .then/.catch handlers. But if runTask throws (rejects), the .catch will be invoked; but also the outer promise is already rejected due to reject(e) inside runTask. However, after reject(e) is called, the returned promise from startNext becomes rejected as well? Actually runTask returns a promise that rejects with e; we attach .then and .catch to it. The .catch will be executed (since rejection). Inside .catch we decrement activeCount. That's fine.
+
+But there is a subtle issue: In the catch block inside runTask, we call reject(e) which will cause the outer promise to settle. Then we also throw e; that throw will propagate up and maybe cause an unhandled rejection? But since we are inside an async function (runTask) that is called from startNext's .then chain, the thrown error will be caught by the .catch block of the returned promise (the same one). Actually runTask returns a promise: inside try, if task throws, catch sets hasError etc., then reject(e) (outer reject), then throw e. The thrown error will cause the promise to reject again? But it's already rejected; throwing inside an async function that is already in a rejection state may lead to unhandled rejection? Let's think: In JavaScript, if you have an async function that throws after catching an exception and calling reject, the rejection is already triggered. The throw will be caught by the async function's internal error handling and may cause another rejection? Actually async functions always return a promise; if they throw, the returned promise rejects with that error. But here we are inside an async function that is called as a result of .then? Wait: runTask is async; it returns a promise. Inside runTask, we call taskFns[idx]() which may throw. In try/catch, we catch and then call reject(e) (the outer promise's reject). Then we throw e again. Since the function is async, any uncaught exception inside an async function causes the returned promise to reject with that error. However, we already called reject(e) on the outer promise; but that outer promise is not the same as the promise returned by runTask? Actually runTask returns a promise (the implicit one). When we call reject(e) on the outer promise (the one passed to promisePool), that's separate from the promise returned by runTask. The throw inside runTask will cause the runTask's promise to reject with e (since it's an async function that throws). But we also called reject(e) on the outer promise; but there may be two rejections: one for the outer promise (already settled), and one for the inner promise (runTask's promise). However, the outer promise is already rejected; calling .reject again after settlement will throw a "Promise already rejected" error? Actually in JavaScript, if you call reject on an already settled promise, it throws a TypeError: "Rejecting a non-settled promise". But here the outer promise is already settled (rejected). Inside runTask's async function, if we call reject(e) again (the same error), it might throw. However, we only call reject once per error (in catch). Then we throw e; that throw will cause the async function to reject with e (again). That would be a second rejection on the same promise? Let's simulate:
+
+- runTask returns a promise P (implicitly). Inside try: if task throws, catch block runs. In catch: errorVal = e; hasError=true; reject(outerPromise, e) => outerPromise is now rejected with e. Then throw e; this throw occurs inside the async function's execution context. Since the function is async, any uncaught exception will cause the returned promise P to reject with that thrown error (e). But P is already in a settled state? Actually after catch block, we didn't return anything; the function ends. The async function returns a promise that resolves to undefined? Wait: In JavaScript, an async function always returns a promise. If it throws an exception, the returned promise rejects with that exception. However, if we have already called reject on some other promise (outer), that's separate.
+
+Thus, inside runTask, after catch we call reject(outerPromise, e) and then throw e. The throw will cause P to reject with e as well. So P will reject with e (same error). That's okay; but outerPromise is already rejected; calling reject on it again would be a problem if we try to reject an already settled promise. But we only call reject once per error (the catch block). The throw after that may cause P to reject, but not outerPromise. So no double rejection.
+
+But the outerPromise's rejection will be triggered by the first reject(e) inside catch. That's fine.
+
+Now about activeCount decrement: In .catch of runTask's returned promise, we decrement activeCount. That's correct.
+
+Potential issue: In startNext, after starting a task, we don't wait for it to finish before starting another if limit allows. That's intended: as soon as one finishes (i.e., when the previous task completes), start next. Our loop structure: startNext is called initially for up to limit tasks. Then inside .then of each completed task, we call startNext again if capacity and pending tasks. This ensures that after each completion, a new task starts (if possible). However, there is a subtle race: If multiple tasks finish nearly simultaneously (e.g., both resolve quickly), the .then handlers will be executed in order of the promises' resolution; but they may interleave. That's okay.
+
+Now about waiting for all tasks: waitPromise checks activeCount===0 && nextIdx>=n. However, if an error occurs and outer promise is rejected, we still wait for active tasks to finish (activeCount may be >0). That's fine.
+
+But there is a problem: If an error occurs early, we call reject(outerPromise) inside runTask's catch. Then the outer promise is already settled. However, the code continues to run the rest of the IIFE: after startNext initial calls, we set up waitPromise and attach .then to resolve or ignore. Since outerPromise is already rejected, calling resolve on it later will be ignored (no effect). That's okay.
+
+Now about error propagation: If an error occurs, we reject with that error. The spec says "the returned promise rejects with that error immediately". Our implementation does that.
+
+Now about limit validation: If limit invalid, return Promise.reject(new TypeError('limit must be a positive integer')). That's correct.
+
+Now about retry: Implementation as described.
+
+Potential issues: In retry, we need to handle the case where fn(attempt) returns a promise that resolves after some time; we await it. Good.
+
+Now final code structure:
+
+// promisePool definition
+async function promisePool(taskFns, limit) { ... }
+
+// retry definition
+async function retry(fn, options = {}) { ... }
+
+module.exports = { promisePool, retry };
+
+Now ensure that all functions are async (they return promises). The spec says "async function promisePool(taskFns, limit)" and "async function retry(fn, options)". So they must be declared as async functions.
+
+Now test with some examples mentally:
+
+Test 1: promisePool([()=>Promise.resolve(1), ()=>Promise.resolve(2)], 1) => returns a promise that resolves to [1,2].
+
+Our code: limit=1 valid. n=2. startNext initially runs task0; activeCount=1. After it resolves, .then: activeCount-- =>0; startNext runs task1 (since nextIdx=1 < n and activeCount<limit). Then after task1 resolves, activeCount-- =>0; nextIdx=2 >= n => stop. waitPromise resolves; hasError false; resolve(results) => [1,2]. Works.
+
+Test 2: limit=2 (greater than n). startNext runs both tasks concurrently. After both finish, activeCount becomes 0; results resolved. Good.
+
+Test 3: taskFns[0] throws synchronously. In runTask catch: hasError=true; errorVal=e; reject outer with e; activeCount++ before calling runTask? Actually startNext increments activeCount then calls runTask(idx). If runTask throws, catch sets hasError and rejects outer. Then .catch of the returned promise will decrement activeCount (since the promise is rejected). So after error, activeCount becomes 0? Wait: activeCount was incremented to 1 before calling runTask. When runTask rejects, the .catch block runs: activeCount-- => 0. Good. Then waitPromise will see activeCount===0 && nextIdx>=n (if no other tasks). But if there are more tasks pending (nextIdx < n), waitPromise will continue waiting until they finish. That's okay.
+
+But note: Since we called reject(outer) inside catch, the outer promise is already rejected; but we still have activeCount maybe 0 after decrement. The waitPromise will resolve quickly (if no other tasks). Then since hasError true, we skip resolve. Good.
+
+Test 4: limit invalid: e.g., limit=0 => return Promise.reject(new TypeError('limit must be a positive integer')). That's correct.
+
+Now test retry:
+
+retry(fn) with default options: retries=3, delayMs=0, factor=2, shouldRetry=(err)=>true.
+
+If fn(1) fails, then wait 0 * 2**(attempt-1) = 0; retry again with attempt=2. If fails again, wait 0*2**1=0; attempt=3; etc. After 4 attempts (1..4), if still failing, reject with last error.
+
+If shouldRetry returns false on first failure: then after first failure, since attempt=1 <= retries but shouldRetry false => reject with last error (no retry). Good.
+
+Now about delay calculation: delayMs * factor ** (attempt - 1). In JS, exponent operator has higher precedence than multiplication? Actually ** has higher precedence than *, I think. But we can compute as delayMs * Math.pow(factor, attempt - 1) to be safe. Or use Math.pow.
+
+Implementation:
+
+const wait = delayMs * Math.pow(factor, attempt - 1);
+
+Now ensure that factor is a number; default 2.
+
+Now about options: If options is undefined? The spec says options is optional. So we can set default parameter options = {}. If someone passes null? Not needed.
+
+Now finalize code.
+
+Potential improvements: Use let activeCount = 0; but need to ensure it's captured in closure.
+
+Now write the module:
+
+const promisePool = async function(taskFns, limit) { ... };
+const retry = async function(fn, options = {}) { ... };
+
+module.exports = { promisePool, retry };
+
+Now ensure that we don't use any external packages.
+
+Now let's write the code with proper comments maybe not needed but okay.
+
+Potential bug: In promisePool, after error occurs and outer promise is rejected, we still have activeCount possibly >0; waitPromise will wait until activeCount becomes 0. That's okay.
+
+But there is a subtle issue: If an error occurs early, we call reject(outer) inside catch. However, the outer promise is already settled; but we also have a .then attached to waitPromise that will try to resolve with results if hasError false. Since hasError true, we skip. Good.
+
+Now about the initial start of tasks: We used a for loop to start up to limit tasks. But if limit > n, we start all tasks at once. That's fine.
+
+But what about scenario where limit is valid but nextIdx < n and activeCount < limit after some tasks finish? The .then of each completed task triggers startNext again (if conditions). This ensures that tasks are started as soon as capacity opens. Good.
+
+Now consider scenario: limit=2, tasks: [task0 resolves quickly, task1 throws synchronously]. Execution:
+
+- startNext(0): activeCount=1; runTask(0) starts.
+- While task0 runs, nextIdx=1 < n and activeCount<limit (1<2) => but we don't start task1 yet because we only start new tasks when a task finishes (via .then). That's correct: as soon as task0 finishes, startNext will be called in its .then. At that point, nextIdx=1 < n and activeCount=0 < limit => startTask(1). Good.
+
+If task0 throws synchronously: catch sets hasError=true, reject outer; but also activeCount decremented via .catch. Then .then not executed (since rejected). So no new tasks started. Good.
+
+Now about error handling for synchronous throw: The runTask's try/catch catches it; we call reject(outer) and throw e. That's fine.
+
+Now about limit validation: If limit is not a positive integer, return Promise.reject(new TypeError('limit must be a positive integer')). But note that returning a rejected promise directly from an async function? Actually we are inside an async function; if we return Promise.reject(...), the async function will return that promise (rejected). That's okay. However, we need to ensure that the returned value is a promise that rejects with TypeError. In our code, we can simply do:
+
+if (!Number.isInteger(limit) || limit <= 0) {
+    return Promise.reject(new TypeError('limit must be a positive integer'));
+}
+
+Since the function is async, returning a rejected promise is allowed; the caller will get a rejected promise.
+
+Now about retry: Should we also handle the case where fn returns a non-promise value? It's fine; await will resolve.
+
+Now final code:
+
+We'll write:
+
+function promisePool(taskFns, limit) { ... }
+
+But spec says async function promisePool(taskFns, limit). So we need to declare as async function.
+
+Implementation details:
+
+async function promisePool(taskFns, limit) {
+    if (!Number.isInteger(limit) || limit <= 0) {
+        return Promise.reject(new TypeError('limit must be a positive integer'));
+    }
+
+    const n = taskFns.length;
+    const results = new Array(n);
+    let nextIdx = 0;
+    let activeCount = 0;
+    let hasError = false;
+    let errorVal = null;
+
+    return new Promise((resolve, reject) => {
+        async function runTask(idx) {
+            try {
+                const ret = await taskFns[idx]();
+                results[idx] = ret;
+                return ret;
+            } catch (e) {
+                results[idx] = e;
+                errorVal = e;
+                hasError = true;
+                reject(e);
+                throw e;
+            }
+        }
+
+        function startNext() {
+            if (hasError || nextIdx >= n || activeCount >= limit) return;
+            const idx = nextIdx++;
+            activeCount++;
+            runTask(idx)
+                .then(() => {
+                    activeCount--;
+                    if (nextIdx < n && activeCount < limit && !hasError) {
+                        startNext();
+                    }
+                })
+                .catch(() => {
+                    activeCount--;
+                });
+        }
+
+        // Start initial batch
+        for (let i = 0; i < Math.min(n, limit); i++) {
+            startNext();
+        }
+
+        // Wait for all tasks to finish
+        const wait = setInterval(() => {
+            if (activeCount === 0 && nextIdx >= n) {
+                clearInterval(wait);
+                if (!hasError) {
+                    resolve(results);
+                } else {
+                    // Already rejected via runTask's reject; but we might still need to resolve? No.
+                    // Actually if hasError, the outer promise is already rejected.
+                }
+                // Clear interval
+            }
+        }, 10);
+
+        // If there were no tasks (n===0), wait will fire immediately; but we need to handle that.
+        // If n===0, nextIdx=0, activeCount=0, hasError false => resolve(results) => [].
+    });
+}
+
+But there is a problem: The interval approach may cause the callback to run even if the promise has already been rejected or resolved. That's okay; we check conditions.
+
+However, we need to ensure that when n===0, we resolve with [] immediately. In our code, startNext loop runs 0 times. wait interval will fire after 10ms: activeCount===0 && nextIdx>=n (0>=0) true => clearInterval and then if (!hasError) resolve(results) => results is [] => resolves. Good.
+
+Now about rejecting on error: In runTask catch, we call reject(e). That's the outer promise's reject. Then later, when wait interval fires, hasError is true, so we skip resolve. But the outer promise is already rejected; no further action needed.
+
+Potential issue: If an error occurs after some tasks have completed and results filled for earlier indices, but we still resolve with results? No, because we reject on first error.
+
+Now about activeCount decrement in .catch: In startNext's .catch we decrement activeCount. But if runTask rejects, the .then won't be called; .catch will be called. That's correct.
+
+But note: In .then we also decrement activeCount after successful completion. However, if the task succeeds, we also need to ensure that the .then runs after the promise resolves. That's fine.
+
+Now about concurrency: The .then of each runTask may cause startNext to be called multiple times in quick succession; but that's okay.
+
+Potential race condition: Suppose limit=2, tasks: task0 and task1 both resolve almost simultaneously. The order of .then callbacks may be interleaved. But startNext will be called twice (once for each). That's fine.
+
+Now about error handling: If a task throws synchronously, runTask's catch calls reject(outer) and then throws e. This will cause the returned promise from runTask to reject with e (again). The .catch block of that promise will decrement activeCount. Good.
+
+But also note that after reject(outer) is called, the outer promise is already rejected; but we still have an interval waiting for tasks to finish. That's okay.
+
+Now about retry: Implementation as described.
+
+Potential improvements: Use a for loop for retries? But while loop is fine.
+
+Now finalize code.
+
+But there might be subtle bug: In promisePool, after error occurs and reject(e) is called, we also throw e inside runTask. This may cause the .catch block of the returned promise to be executed (since the promise is rejected). Inside that .catch we decrement activeCount again? Actually we already decremented activeCount in the outer catch's reject? Wait: In runTask, after catch block, we call reject(outer) and then throw e. The thrown error will cause the async function's returned promise to reject with e (again). But we also have .catch attached to that promise; inside .catch we decrement activeCount. However, activeCount was already decremented in the outer catch? No, activeCount was incremented before calling runTask. When runTask throws (or rejects), we go into catch block: set hasError, errorVal, reject outer, throw e. The thrown error triggers the .catch of the promise returned by runTask (since it's a rejected promise). In that .catch we decrement activeCount. So activeCount becomes 0 after error (if only one task running). That's correct.
+
+Now about multiple tasks: If two tasks running and one throws, hasError becomes true; activeCount may be 2 initially; after error, we decrement activeCount in .catch of the failing task's promise (so activeCount becomes 1). The other task continues running. At the end, wait for both to finish; activeCount will become 0 after both complete. Good.
+
+Now about the interval: It checks activeCount===0 && nextIdx>=n. If error occurred and outer reject already, we still wait for tasks to finish (activeCount may be >0). That's fine.
+
+Now test with simple scenario:
+
+taskFns = [()=>Promise.resolve(1), ()=>Promise.resolve(2)], limit=1.
+
+- startNext: activeCount=1; runTask(0) returns promise p0.
+- wait interval not started yet (we set interval after starting tasks? Actually we set interval before starting tasks? In code above, we set interval after defining runTask etc. But we also start initial batch before setting interval. That's okay.
+
+- When p0 resolves: .then runs: activeCount-- => 0; nextIdx=1 < n and activeCount<limit (0<1) => startNext: startTask(1). So activeCount becomes 1 again.
+- Then p1 resolves: .then: activeCount-- =>0; nextIdx=2 >= n => no more start. interval fires after some time: activeCount===0 && nextIdx>=n => true; hasError false => resolve(results) => [1,2].
+
+Works.
+
+Now test with error:
+
+taskFns[0] = () => { throw new Error('err'); }, limit=1.
+
+- startNext: activeCount=1; runTask(0) throws; catch sets hasError=true; reject outer; throw e.
+- .catch of runTask's promise runs: activeCount-- => 0.
+- interval fires: activeCount===0 && nextIdx>=n? nextIdx still 0 because we didn't start any more tasks. So condition true; but hasError true => skip resolve. Outer promise is already rejected. Good.
+
+Now test with limit invalid: limit=0 => returns Promise.reject(new TypeError('limit must be a positive integer')). That's correct.
+
+Now test retry:
+
+Define fn = (attempt) => {
+   if (attempt === 1) throw new Error('fail');
+   return 'success';
+};
+
+retry(fn) => should call with attempt 1 fails, wait 0ms (delayMs=0), attempt2 succeeds => returns 'success'.
+
+Our code: attempt starts at 1; while loop: try fn(1) throws => catch sets lastError, attempt <= retries (1 <=3) and shouldRetry true => compute wait = 0 * Math.pow(2,0)=0; await setTimeout; attempt++ => 2; loop again; fn(2) returns 'success' => resolve. Good.
+
+If shouldRetry returns false on first failure: retry(fn, {shouldRetry: (err) => false}) => after first failure, attempt=1 > retries? No, but shouldRetry false => reject with last error. Our code: in catch block, if attempt > retries || !shouldRetry(e) => throw e (reject). Since attempt=1 <= retries, but !shouldRetry true => reject. Good.
+
+Now test delay calculation: delayMs=100, factor=2, attempt=3 => wait = 100 * 2**(2) = 400ms. Implementation uses Math.pow(factor, attempt-1). Good.
+
+Now finalize code.
+
+Potential improvements: Use const for functions; but not required.
+
+Now write final module:
+
+```javascript
+'use strict';
+
+async function promisePool(taskFns, limit) {
+    if (!Number.isInteger(limit) || limit <= 0) {
+        return Promise.reject(new TypeError('limit must be a positive integer'));
+    }
+
+    const n = taskFns.length;
+    const results = new Array(n);
+    let nextIdx = 0;
+    let activeCount = 0;
+    let hasError = false;
+    let errorVal = null;
+
+    return new Promise((resolve, reject) => {
+        async function runTask(idx) {
+            try {
+                const ret = await taskFns[idx]();
+                results[idx] = ret;
+                return ret;
+            } catch (e) {
+                results[idx] = e;
+                errorVal = e;
+                hasError = true;
+                reject(e);
+                throw e;
+            }
+        }
+
+        function startNext() {
+            if (hasError || nextIdx >= n || activeCount >= limit) return;
+            const idx = nextIdx++;
+            activeCount++;
+            runTask(idx)
+                .then(() => {
+                    activeCount--;
+                    if (nextIdx < n && activeCount < limit && !hasError) {
+                        startNext();
+                    }
+                })
+                .catch(() => {
+                    activeCount--;
+                });
+        }
+
+        // Start initial batch
+        for (let i = 0; i < Math.min(n, limit); i++) {
+            startNext();
+        }
+
+        // Wait until all tasks have finished
+        const timer = setInterval(() => {
+            if (activeCount === 0 && nextIdx >= n) {
+                clearInterval(timer);
+                if (!hasError) {
+                    resolve(results);
+                } else {
+                    // Already rejected via runTask's reject; do nothing.
+                }
+            }
+        }, 10);
+
+        // If there were no tasks, resolve immediately
+        if (n === 0) {
+            clearInterval(timer);
+            resolve(results);
+        }
+    });
+}
+
+async function retry(fn, options = {}) {
+    const { retries = 3, delayMs = 0, factor = 2, shouldRetry = (err) => true } = options;
+    let attempt = 1;
+    let lastError = null;
+
+    while (true) {
+        try {
+            const result = await fn(attempt);
+            return result;
+        } catch (e) {
+            lastError = e;
+            if (attempt > retries || !shouldRetry(e)) {
+                throw e;
+            }
+            const wait = delayMs * Math.pow(factor, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, wait));
+            attempt++;
+        }
+    }
+}
+
+module.exports = { promisePool, retry };
+```
+
+Check for any missing pieces: The interval approach may cause the callback to fire even after resolve/reject; but we check conditions.
+
+Potential bug: In the interval callback, if hasError is true, we skip resolve. But outer promise already rejected; fine.
+
+But what about case where n===0? We handle by resolving immediately. However, we also have interval that will fire after 10ms and resolve again (if not resolved). Since we clearInterval and resolve(results) => [] before setting timer? Actually we set timer after starting tasks; but for n===0, we start no tasks; activeCount=0; nextIdx=0; hasError false. The interval will fire after 10ms: activeCount===0 && nextIdx>=n (0>=0) true => clearInterval and resolve(results) => [] (already resolved? Actually the outer promise hasn't been resolved yet; we need to resolve. That's fine.
+
+But we also have early return for n===0 before setting timer? In code above, after creating the Promise, we start initial batch loop (which runs 0 times). Then we set up interval. Then we check if n===0: clearInterval and resolve(results). However, note that the interval is already set; we need to clear it before resolving. That's done.
+
+But there is a subtle issue: If n===0, we call resolve(results) inside the interval callback after clearing timer. That's okay.
+
+Now ensure that the module exports correctly.
+
+Potential improvements: Use let activeCount = 0; but we need to capture in closures; fine.
+
+Now test with some scenarios manually:
+
+Case: promisePool([()=>1, ()=>2], 1) => Should resolve to [1,2].
+
+Simulate:
+
+- limit=1 valid.
+- n=2.
+- results=[undefined, undefined].
+- startNext: activeCount=1; runTask(0) returns a promise that resolves to 1. In .then: activeCount-- =>0; nextIdx=1 < n and activeCount<limit (0<1) => startNext: idx=1, activeCount=1; runTask(1) resolves to 2.
+- .then: activeCount-- =>0; nextIdx=2 >= n => no start.
+- interval fires: activeCount===0 && nextIdx>=n true; hasError false => resolve(results) => [1,2]. Good.
+
+Case: limit=2, tasks as above. startNext runs both tasks concurrently. After both resolve, activeCount becomes 0 after each .then. The interval will fire after some time and resolve. Works.
+
+Case: error in first task: promisePool([()=>{throw new Error('x')}, ()=>1], 1).
+
+- startNext: activeCount=1; runTask(0) throws; catch sets hasError=true, reject outer, throw e.
+- .catch of runTask's promise: activeCount-- =>0.
+- interval fires: activeCount===0 && nextIdx>=n? nextIdx still 0 (since we didn't start second). So condition false (nextIdx < n). So wait continues. Eventually after some time, the second task hasn't started yet because no capacity (activeCount=0 < limit but startNext not called again). Actually after error, hasError true prevents starting new tasks. So second task never runs. That's per spec: no new tasks after error. So results array will have results[0] set to error? In catch we set results[idx]=e. So results[0] = error, but we reject anyway. The outer promise rejects with the error. Good.
+
+Now about results for tasks that completed before error: They are stored in results array; but since we reject, they are ignored. That's fine.
+
+Now test retry:
+
+Define fn = (attempt) => { if (attempt === 1) throw new Error('fail'); return 'ok'; }
+
+retry(fn) => attempt1 fails, wait 0ms, attempt2 returns 'ok'. Should work.
+
+Our code: attempt=1; try fn(1) throws; catch sets lastError; attempt <= retries (1<=3) and shouldRetry true => compute wait = 0 * Math.pow(2,0)=0; await setTimeout(0); attempt++ =>2; loop again; fn(2) returns 'ok' => resolve. Good.
+
+Now test delay: delayMs=100, factor=2, attempt=1 => wait=100*1=100ms; attempt2 => wait=100*2=200ms; etc.
+
+Now ensure that retry returns a promise (async). Yes.
+
+Now final code block.
+
+But there might be an issue: In promisePool, after error occurs and reject(e) is called, we also throw e inside runTask. This may cause the outer promise to reject twice? Actually reject(e) is called once; then the thrown error leads to another rejection of the inner promise (runTask's promise). That's okay.
+
+But there is a subtle bug: In the .then of runTask's promise, after successful completion we decrement activeCount and possibly start next. However, if an error occurs in a later task while earlier tasks are still running, hasError becomes true; startNext will not start new tasks. But the currently running tasks (including the one that failed) will continue to finish. That's fine.
+
+Now about waiting for all tasks: The interval checks activeCount===0 && nextIdx>=n. If an error occurred and outer promise is rejected, we still wait for active tasks to finish. That's okay.
+
+Potential issue: If limit is valid but n=0, we start no tasks; interval will fire after 10ms; resolve(results) => [] . Works.
+
+Now about the module exports: The spec says "Write a Node.js (v24) CommonJS module that exports two functions: `module.exports = { promisePool, retry };`". So we need to assign an object with those keys. We'll do:
+
+module.exports = { promisePool, retry };
+
+Now ensure that both functions are async.
+
+Now final code.
+
+But there might be a problem with the interval approach: The interval callback runs every 10ms; if activeCount becomes 0 and nextIdx >= n, we clearInterval and resolve. However, if an error occurs and outer promise is already rejected, we skip resolve. But what about the case where n=0? We handle early.
+
+But there is a scenario: If limit is valid but tasks are all completed before interval fires (i.e., activeCount becomes 0 exactly at same time as nextIdx >= n). The interval may fire after some delay; but we clearInterval and resolve. That's fine.
+
+Now test with more complex concurrency: limit=2, tasks: [task0 takes long, task1 quick]. Should start both concurrently? Actually initial batch runs up to limit tasks: startNext for i=0..min(n,limit) => startTask(0) and startTask(1) concurrently. That's correct.
+
+Now test with scenario where a task throws synchronously after some have completed: e.g., limit=2, tasks: [quick success, error]. Execution:
+
+- startNext(0): activeCount=1; runTask(0) resolves quickly.
+- While task0 runs, nextIdx=1 < n and activeCount<limit (1<2) => but we don't start task1 yet because we only start new tasks when a task finishes (via .then). After task0 resolves, .then: activeCount-- =>0; then startNext(1): activeCount=1; runTask(1) throws.
+- In catch: hasError=true; reject outer; throw e.
+- .catch of runTask's promise decrements activeCount =>0.
+- interval fires: activeCount===0 && nextIdx>=n? nextIdx still 1 (since we didn't start any more tasks). So condition false. But outer promise already rejected. Good.
+
+Thus results[0] set to success, results[1] set to error; but we reject with error. That's acceptable.
+
+Now about the spec: "If any task rejects or throws, the returned promise rejects with that error immediately, and no new tasks are started after that point (tasks already running are simply left alone)." Our implementation respects that.
+
+Now final code.
+
+But there is a nuance: In runTask catch block, we call reject(e) which rejects the outer promise. However, if multiple tasks throw, the first one will cause rejection; subsequent ones may also try to reject (but the promise is already settled). That's okay.
+
+Now about retry: The spec says "If it rejects/throws, and fewer than retries retries have been made so far, and shouldRetry(err) returns true, wait delayMs * factor ** (attempt - 1) milliseconds and call fn again with the next attempt number."
+
+Our implementation uses attempt starting at 1. For each failure, we check if attempt > retries or !shouldRetry(e). If either true, reject. Otherwise wait and increment attempt.
+
+But note: The condition "fewer than retries retries have been made so far" means that we allow up to retries+1 attempts (including the first). Our loop allows attempt <= retries for retries; after attempt=retries+1, attempt > retries triggers rejection. Good.
+
+Now about factor exponent: delayMs * factor ** (attempt - 1). We used Math.pow(factor, attempt-1) which is equivalent.
+
+Now final code.
+
+Potential improvements: Use const for functions; but not needed.
+
+Now produce final answer with code block.
+
+But we must ensure that the code is valid Node.js v24. No external packages.
+
+Now write final code:
+
+```javascript
+'use strict';
+
+async function promisePool(taskFns, limit) {
+    if (!Number.isInteger(limit) || limit <= 0) {
+        return Promise.reject(new TypeError('limit must be a positive integer'));
+    }
+
+    const n = taskFns.length;
+    const results = new Array(n);
+    let nextIdx = 0;
+    let activeCount = 0;
+    let hasError = false;
+    let errorVal = null;
+
+    return new Promise((resolve, reject) => {
+        async function runTask(idx) {
+            try {
+                const ret = await taskFns[idx]();
+                results[idx] = ret;
+                return ret;
+            } catch (e) {
+                results[idx] = e;
+                errorVal = e;
+                hasError = true;
+                reject(e);
+                throw e;
+            }
+        }
+
+        function startNext() {
+            if (hasError || nextIdx >= n || activeCount >= limit) return;
+            const idx = nextIdx++;
+            activeCount++;
+            runTask(idx)
+                .then(() => {
+                    activeCount--;
+                    if (nextIdx < n && activeCount < limit && !hasError) {
+                        startNext();
+                    }
+                })
+                .catch(() => {
+                    activeCount--;
+                });
+        }
+
+        // Start initial batch
+        for (let i = 0; i < Math.min(n, limit); i++) {
+            startNext();
+        }
+
+        // Wait until all tasks have finished
+        const timer = setInterval(() => {
+            if (activeCount === 0 && nextIdx >= n) {
+                clearInterval(timer);
+                if (!hasError) {
+                    resolve(results);
+                }
+                // If there was an error the outer promise has already been rejected.
+            }
+        }, 10);
+
+        // Immediate resolution for empty task list
+        if (n === 0) {
+            clearInterval(timer);
+            resolve(results);
+        }
+    });
+}
+
+async function retry(fn, options = {}) {
+    const { retries = 3, delayMs = 0, factor = 2, shouldRetry = (err) => true } = options;
+    let attempt = 1;
+    let lastError = null;
+
+    while (true) {
+        try {
+            const result = await fn(attempt);
+            return result;
+        } catch (e) {
+            lastError = e;
+            if (attempt > retries || !shouldRetry(e)) {
+                throw e;
+            }
+            const wait = delayMs * Math.pow(factor, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, wait));
+            attempt++;
+        }
+    }
+}
+
+module.exports = { promisePool, retry };
+```
+
+Check for any missing semicolons? Not required.
+
+Now ensure that the code uses only CommonJS features: async functions are allowed in Node.js v24 (ES2017). Yes.
+
+Now final answer.
